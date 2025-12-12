@@ -192,7 +192,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 st.set_page_config(page_title="Dashboard de Notas Docente (Online)", layout="wide")
 
-# 1. CARGA Y CÁLCULO INICIAL
+# 1. CARGA Y CÁLCULO INICIAL (Se ejecuta y guarda en session_state)
 if 'df_final_completo' not in st.session_state:
     with st.spinner("Cargando y validando datos desde Google Drive..."):
         df_alumnos_full, df_cursos_full, df_notas_brutas_full = load_data_online()
@@ -201,6 +201,13 @@ if 'df_final_completo' not in st.session_state:
         st.stop()
 
     df_final_full = integrar_y_calcular(df_alumnos_full, df_cursos_full, df_notas_brutas_full)
+
+    # --- ¡SECCIÓN CORREGIDA AÑADIDA AQUÍ! ---
+    # Guardamos los encabezados de notas en la sesión si aún no existen
+    if 'notas_columns' not in st.session_state and not df_notas_brutas_full.empty:
+        st.session_state['notas_columns'] = df_notas_brutas_full.columns.tolist()
+    # ------------------------------------------
+
     st.session_state['df_final_completo'] = df_final_full
     st.session_state['df_notas_base'] = df_notas_brutas_full
 
