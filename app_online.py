@@ -2,16 +2,17 @@ import streamlit as st
 import pandas as pd
 import gspread
 import numpy as np
-from gspread import utils  # Utilidad para convertir coordenadas A1
+import json  # Necesario para decodificar la cadena JSON de las credenciales
+from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
 COLUMNAS_NOTAS = ['Parcial 1', 'Parcial 2']
 ID_ALUMNO = 'DNI'
-ID_CURSO = 'ID_CURSO'
-# Nota: 'Comentarios_Docente' se añade a las notas en la hoja de Drive.
+# Usamos 'ID_CURSO' para la hoja 'notas' y 'D_CURSO' para la hoja 'cursos'
+ID_CURSO_NOTAS = 'ID_CURSO'
+ID_CURSO_MAESTRO = 'D_CURSO'
 
-# Base de datos de docentes con su DNI y sus cursos asignados (Lectura de la hoja 'cursos')
-# ESTO ES MANUAL PARA EL DEMO. En producción, podrías leer esto de una hoja de instructores.
+# Base de datos de docentes con su DNI y sus cursos asignados (Simulación/Lectura)
 DOCENTES_ASIGNADOS = {
     '17999767': ['MMA-FH-2025-P', 'MMA-FH-2025-F'],  # Graciela
     '27642905': ['AER-MAT-2025-P'],  # Rodolfo
@@ -20,7 +21,7 @@ DOCENTES_ASIGNADOS = {
 
 
 # ----------------------------------------------------------------------
-#                         CONEXIÓN Y CARGA DE DATOS REALES
+#                         CONEXIÓN Y CARGA DE DATOS REALES (GSPREAD)
 # ----------------------------------------------------------------------
 
 @st.cache_data(ttl=600)  # Cacha los datos por 10 minutos
@@ -29,37 +30,26 @@ def load_data_online():
     Carga los DataFrames de Google Sheets usando gspread y st.secrets (Streamlit Cloud).
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
-        # Lee las claves individuales de Streamlit Cloud Secrets
-        gcp_service_account_dict = {
-            "type": st.secrets["gcp_service_account_type"],
-            "project_id": st.secrets["gcp_service_account_project_id"],
-            "private_key_id": st.secrets["gcp_service_account_private_key_id"],
-            "private_key": st.secrets["gcp_service_account_private_key"],
-            "client_email": st.secrets["gcp_service_account_client_email"],
-            "client_id": st.secrets["gcp_service_account_client_id"],
-            # Añadir todas las demás claves necesarias de tu JSON de servicio
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"]
-        }
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES (a partir de la cadena JSON única)
+
+        # Lee la cadena JSON completa del secreto
+        credentials_json_str = st.secrets["gcp_credentials_json"]
+
+        # Convierte la cadena JSON en un diccionario de Python
+        gcp_service_account_dict = json.loads(credentials_json_str)
 
         # 2. AUTENTICACIÓN
         gc = gspread.service_account_from_dict(gcp_service_account_dict)
 
-        # 3. ACCESO A URLs
-        url_cursos = st.secrets["cursos_sheet_url"]
-        url_notas = st.secrets["notas_sheet_url"]
+        # 3. ACCESO A URLs y Apertura del ÚNICO Archivo
+        url_archivo_central = st.secrets["cursos_sheet_url"]  # Usamos la misma URL para todo
 
-        # 4. LECTURA DE DATOS
-        cursos_sheet = gc.open_by_url(url_cursos)
-        notas_sheet = gc.open_by_url(url_notas)
+        archivo_sheets = gc.open_by_url(url_archivo_central)
 
-        # .get_all_records() lee los datos como un diccionario (con encabezado como clave)
-        df_alumnos = pd.DataFrame(cursos_sheet.worksheet("alumnos").get_all_records())
-        df_cursos = pd.DataFrame(cursos_sheet.worksheet("cursos").get_all_records())
-        df_notas_brutas = pd.DataFrame(notas_sheet.worksheet("notas").get_all_records())
+        # 4. LECTURA DE DATOS de las tres pestañas
+        df_alumnos = pd.DataFrame(archivo_sheets.worksheet("alumnos").get_all_records())
+        df_cursos = pd.DataFrame(archivo_sheets.worksheet("cursos").get_all_records())
+        df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
 
         # Limpieza: Asegurar que las columnas de notas sean numéricas y sin NaN
         cols_para_limpiar = COLUMNAS_NOTAS
@@ -75,9 +65,13 @@ def load_data_online():
         st.error(
             f"Error de API de Google (Permisos/Conexión). Asegúrese de que el correo de la Cuenta de Servicio tiene acceso de Lector/Editor a los archivos. Detalle: {api_e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    except KeyError as k_e:
+        st.error(
+            f"Error al encontrar clave en Streamlit Secrets. Detalle: {k_e}. Asegúrese de usar la clave 'gcp_credentials_json'.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except Exception as e:
         st.error(
-            f"Error al cargar los datos. Verifique las URLs, los nombres de las hojas o el formato de las credenciales en Streamlit Secrets. Detalle: {e}")
+            f"Error al cargar los datos. Verifique las URLs, los nombres de las hojas ('alumnos', 'cursos', 'notas') o el formato de las credenciales. Detalle: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
@@ -86,12 +80,14 @@ def load_data_online():
 # ----------------------------------------------------------------------
 
 def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
-    """Integra y calcula el promedio por materia."""
+    """
+    Integra los datos de Alumnos, Cursos y Notas, y calcula el promedio por materia.
+    """
 
     if df_alumnos.empty or df_cursos.empty or df_notas.empty:
         return pd.DataFrame()
 
-    # 1. Unir Notas con Alumnos
+    # 1. Unir Notas con Alumnos (Usando DNI)
     df_paso1 = pd.merge(
         df_notas,
         df_alumnos[[ID_ALUMNO, 'Nombre', 'Apellido']],
@@ -99,16 +95,18 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
         how='left'
     )
 
-    # 2. Unir con Cursos
+    # 2. Unir con Cursos (Usando ID_CURSO_NOTAS y ID_CURSO_MAESTRO)
+    # ESTA ES LA SECCIÓN CORREGIDA DEL KEYERROR
     df_final = pd.merge(
         df_paso1,
-        df_cursos[['D_CURSO', 'Asignatura']],
-        left_on='ID_CURSO',
-        right_on='D_CURSO',
+        df_cursos[[ID_CURSO_MAESTRO, 'Asignatura']],  # Seleccionamos las columnas de la hoja 'cursos'
+        left_on=ID_CURSO_NOTAS,  # Columna en df_paso1 (hoja notas)
+        right_on=ID_CURSO_MAESTRO,  # Columna en df_cursos (hoja cursos)
         how='left'
     )
 
-    df_final.drop(columns=['D_CURSO'], inplace=True)
+    # Después del merge, eliminamos la columna duplicada (la clave de la derecha)
+    df_final.drop(columns=[ID_CURSO_MAESTRO], inplace=True)
 
     # 3. CÁLCULO DE PROMEDIOS
     df_final['Promedio_Materia'] = df_final[COLUMNAS_NOTAS].mean(axis=1).round(2)
@@ -121,35 +119,27 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
 # ----------------------------------------------------------------------
 
 def save_data_to_gsheet(df_original_notas_base, edited_data):
-    """Identifica los cambios en el editor y los escribe en la Hoja de Google de Notas."""
-
+    """
+    Identifica los cambios en el editor y los escribe en la Hoja de Google de Notas.
+    """
     if not edited_data['edited_rows']:
         st.warning("No se detectaron cambios para guardar.")
         return
 
     try:
         # Reconstrucción de credenciales para el guardado
-        gcp_service_account_dict = {
-            "type": st.secrets["gcp_service_account_type"],
-            "project_id": st.secrets["gcp_service_account_project_id"],
-            "private_key_id": st.secrets["gcp_service_account_private_key_id"],
-            "private_key": st.secrets["gcp_service_account_private_key"],
-            "client_email": st.secrets["gcp_service_account_client_email"],
-            "client_id": st.secrets["gcp_service_account_client_id"],
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"]
-        }
+        credentials_json_str = st.secrets["gcp_credentials_json"]
+        gcp_service_account_dict = json.loads(credentials_json_str)
 
         gc = gspread.service_account_from_dict(gcp_service_account_dict)
-        spreadsheet = gc.open_by_url(st.secrets["notas_sheet_url"])
+        url_archivo_central = st.secrets["cursos_sheet_url"]
+
+        spreadsheet = gc.open_by_url(url_archivo_central)
         worksheet = spreadsheet.worksheet("notas")
 
         updates = []
         original_cols = st.session_state['notas_columns']
 
-        # 1. Iterar sobre las filas modificadas
         for df_index, col_updates in edited_data['edited_rows'].items():
 
             # gsheet_row_index es el índice de la fila en GSheet (índice 0-based de Pandas + 2)
@@ -157,14 +147,12 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
             for col_name, new_value in col_updates.items():
 
-                # Omitir columnas que no están en la hoja de notas original
+                # Solo guardar si la columna existe en la hoja de notas original
                 if col_name not in original_cols:
                     continue
 
-                # Encontrar el índice de la columna en GSheet
                 col_index = original_cols.index(col_name) + 1
 
-                # Crear el rango A1 para la celda a actualizar
                 cell_a1 = utils.rowcol_to_a1(gsheet_row_index, col_index)
 
                 updates.append({
@@ -172,12 +160,11 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
                     'values': [[new_value]]
                 })
 
-        # 2. Enviar todas las actualizaciones
         if updates:
             worksheet.batch_update(updates)
             st.success(f"💾 ¡{len(updates)} cambios guardados exitosamente en Google Sheets!")
 
-            # Limpiar cache y forzar recarga para ver los datos frescos de Drive
+            # Limpiar cache y forzar recarga
             st.cache_data.clear()
             st.rerun()
 
@@ -209,17 +196,20 @@ if 'authenticated' not in st.session_state:
     st.session_state['docente_dni'] = None
 
 
-# --- Función de Login (Sin Cambios) ---
+# --- Función de Login ---
 def login_form():
     st.sidebar.header("Inicio de Sesión")
 
+    # Leer la contraseña de los secrets (si existe)
+    default_password = st.secrets.get("app_password", "1234")
+
     with st.sidebar.form("login_form"):
         dni_input = st.text_input("DNI del Docente (Ej: 17999767)", value="")
-        password_input = st.text_input("Contraseña (Ej: 1234)", type="password")
+        password_input = st.text_input("Contraseña", type="password")
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            if dni_input in DOCENTES_ASIGNADOS and password_input == "1234":
+            if dni_input in DOCENTES_ASIGNADOS and password_input == default_password:
                 st.session_state['authenticated'] = True
                 st.session_state['docente_dni'] = dni_input
                 st.sidebar.success(f"Bienvenido Docente con DNI: {dni_input}")
@@ -244,23 +234,18 @@ def show_dashboard_filtrado(docente_dni):
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
     df_final_completo = st.session_state['df_final_completo']
     df_filtrado_docente_base = df_final_completo[
-        df_final_completo[ID_CURSO].isin(cursos_asignados)
+        df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
     ].reset_index(drop=True).copy()
-
-    # Asegúrate de que todas las columnas que necesitas editar estén presentes
-    if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
-        df_filtrado_docente_base['Comentarios_Docente'] = ''
 
     # 2. INTERFAZ DE EDICIÓN CON BOTÓN DE GUARDAR
 
-    columnas_visibles_editor = ['Nombre', 'Apellido', 'Asignatura', 'ID_CURSO'] + COLUMNAS_NOTAS + [
+    columnas_visibles_editor = ['Nombre', 'Apellido', 'Asignatura', ID_CURSO_NOTAS] + COLUMNAS_NOTAS + [
         'Comentarios_Docente']
 
     st.header('📝 Edición de Notas y Comentarios')
     st.warning(
         "🚨 **Edite directamente las notas y comentarios. Use el botón 'Guardar Cambios' para persistir la data en Drive.**")
 
-    # Creamos un formulario para agrupar el editor y el botón
     with st.form("notas_form"):
 
         df_editado_with_info = st.data_editor(
@@ -272,7 +257,7 @@ def show_dashboard_filtrado(docente_dni):
                 "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
                 "Apellido": st.column_config.TextColumn("Apellido", disabled=True),
                 "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
-                "ID_CURSO": st.column_config.TextColumn("ID_CURSO", disabled=True),
+                ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
             },
             hide_index=False,
             use_container_width=True,
