@@ -24,7 +24,7 @@ def load_data_online():
     Carga todos los DataFrames necesarios reconstruyendo el diccionario de credenciales.
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES (¡CLAVES CORREGIDAS!)
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -33,7 +33,6 @@ def load_data_online():
             "client_email": st.secrets["gcp_service_account_client_email"],
             "client_id": st.secrets["gcp_service_account_client_id"],
 
-            # --- CLAVES CORREGIDAS (Usando los nombres de clave configurados en Secrets) ---
             "auth_uri": st.secrets["gcp_service_account_auth_uri"],
             "token_uri": st.secrets["gcp_service_account_token_uri"],
             "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
@@ -134,7 +133,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         return
 
     try:
-        # Reconstrucción de credenciales para el guardado (¡CLAVES CORREGIDAS!)
+        # Reconstrucción de credenciales para el guardado
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -219,10 +218,17 @@ if 'df_final_completo' not in st.session_state:
         df_alumnos_full = clean_code_column(df_alumnos_full, 'DNI')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'DNI')
 
-        # Limpieza de IDs de Curso en todas las hojas relevantes
+        # Limpieza de IDs de Curso en todas las hojas relevantes (Espacios)
         df_instructores_full = clean_code_column(df_instructores_full, 'ID_CURSO')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'ID_CURSO')
         df_cursos_full = clean_code_column(df_cursos_full, 'D_CURSO')
+
+        # --- NUEVA CORRECCIÓN: UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS ---
+        # Esto resuelve problemas de mayúsculas/minúsculas en los cruces
+        df_instructores_full['ID_CURSO'] = df_instructores_full['ID_CURSO'].str.upper()
+        df_notas_brutas_full['ID_CURSO'] = df_notas_brutas_full['ID_CURSO'].str.upper()
+        df_cursos_full['D_CURSO'] = df_cursos_full['D_CURSO'].str.upper()
+        # ---------------------------------------------------------------
 
 
     except Exception as e:
@@ -329,10 +335,10 @@ def show_dashboard_filtrado(docente_dni):
         df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
     ].reset_index(drop=True).copy()
 
-    # Si el filtro no encuentra ninguna nota (porque no hay datos)
+    # Si el filtro no encuentra ninguna nota
     if df_filtrado_docente_base.empty:
         st.warning(
-            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía.")
+            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior.")
         return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
