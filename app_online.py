@@ -22,11 +22,11 @@ DOCENTES_ASIGNADOS = {}
 @st.cache_data(ttl=600)
 def load_data_online():
     """
-    Carga todos los DataFrames necesarios (alumnos, cursos, notas, instructores)
-    reconstruyendo el diccionario de credenciales a partir de las claves planas de st.secrets.
+    Carga todos los DataFrames necesarios reconstruyendo el diccionario de credenciales
+    a partir de las claves planas de st.secrets.
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES (A partir de CLAVES PLANAS de Streamlit Secrets)
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -52,8 +52,7 @@ def load_data_online():
         df_alumnos = pd.DataFrame(archivo_sheets.worksheet("alumnos").get_all_records())
         df_cursos = pd.DataFrame(archivo_sheets.worksheet("cursos").get_all_records())
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
-        df_instructores = pd.DataFrame(
-            archivo_sheets.worksheet("instructores").get_all_records())  # Lectura de credenciales y asignaciones
+        df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
 
         # Limpieza de notas
         cols_para_limpiar = COLUMNAS_NOTAS
@@ -128,7 +127,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         return
 
     try:
-        # Reconstrucción de credenciales
+        # Reconstrucción de credenciales para el guardado
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -196,6 +195,19 @@ if 'df_final_completo' not in st.session_state:
         st.error("No se pudieron cargar todos los datos maestros (incluyendo la lista de instructores).")
         st.stop()
 
+    # --- CONVERSIÓN CRÍTICA DE DNI A STRING ---
+    try:
+        # Forzar la conversión de DNI a cadena para asegurar que el merge y el login funcionen
+        if 'DNI_DOCENTE' in df_instructores_full.columns:
+            df_instructores_full['DNI_DOCENTE'] = df_instructores_full['DNI_DOCENTE'].astype(str)
+        if 'DNI' in df_alumnos_full.columns:
+            df_alumnos_full['DNI'] = df_alumnos_full['DNI'].astype(str)
+            df_notas_brutas_full['DNI'] = df_notas_brutas_full['DNI'].astype(str)
+    except Exception as e:
+        st.error(f"Error al intentar convertir columnas DNI a texto: {e}")
+        st.stop()
+    # ------------------------------------------
+
     # --- PROCESAMIENTO DINÁMICO: Crea los diccionarios de asignaciones y claves ---
     try:
         # 1. Crear el mapa de asignaciones (DNI -> [Cursos])
@@ -218,7 +230,6 @@ if 'df_final_completo' not in st.session_state:
         st.error(
             f"Error al procesar la hoja 'instructores'. Asegúrese de que existen las columnas 'DNI_DOCENTE', 'ID_CURSO' y 'Clave_Acceso' y que no tienen espacios. Detalle: {k_e}")
         st.stop()
-
     # --- FIN PROCESAMIENTO DINÁMICO ---
 
     df_final_full = integrar_y_calcular(df_alumnos_full, df_cursos_full, df_notas_brutas_full)
@@ -250,9 +261,12 @@ def login_form():
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            # 1. Verificar si el DNI existe en las asignaciones de Drive
+            # 1. Aseguramos que el DNI ingresado sea un string (aunque text_input ya lo es)
+            dni_input = str(dni_input).strip()
+
+            # 2. Verificar si el DNI existe en las asignaciones de Drive
             if dni_input in docentes_map:
-                # 2. Verificar si la clave ingresada coincide con la clave_map de Drive
+                # 3. Verificar si la clave ingresada coincide con la clave_map de Drive
                 if password_input == claves_map.get(dni_input):
                     st.session_state['authenticated'] = True
                     st.session_state['docente_dni'] = dni_input
