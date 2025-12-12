@@ -8,15 +8,13 @@ from gspread import utils
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
 COLUMNAS_NOTAS = ['Parcial 1', 'Parcial 2']
 ID_ALUMNO = 'DNI'
+# Usamos 'ID_CURSO' para la hoja 'notas' e 'ID_CURSO' en 'instructores' (si lo usaste en drive)
 ID_CURSO_NOTAS = 'ID_CURSO'
-ID_CURSO_MAESTRO = 'D_CURSO'
+ID_CURSO_MAESTRO = 'D_CURSO'  # Usado en la hoja 'cursos'
 
-# Base de datos de docentes con su DNI y sus cursos asignados (Simulación/Lectura)
-DOCENTES_ASIGNADOS = {
-    '17999767': ['MMA-FH-2025-P', 'MMA-FH-2025-F'],  # Graciela
-    '27642905': ['AER-MAT-2025-P'],  # Rodolfo
-    '22041283': ['MMA-FH-2025-P', 'MMA-FH-2025-F']  # Daniel
-}
+# NOTA: DOCENTES_ASIGNADOS AHORA SE CARGA DE DRIVE. El diccionario aquí es solo un fallback si falla la carga.
+# Si el código se carga correctamente de Drive, esta variable no se usa.
+DOCENTES_ASIGNADOS = {}
 
 
 # ----------------------------------------------------------------------
@@ -27,11 +25,10 @@ DOCENTES_ASIGNADOS = {
 def load_data_online():
     """
     Carga los DataFrames de Google Sheets reconstruyendo el diccionario de credenciales
-    a partir de las claves planas de st.secrets.
+    a partir de las claves planas de st.secrets y retorna también la tabla de instructores.
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES (a partir de CLAVES PLANAS)
-        # Este método evita el error de KeyError al buscar 'gcp_credentials_json'
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -43,43 +40,45 @@ def load_data_online():
             "token_uri": st.secrets["gcp_service_account_token_uri"],
             "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
             "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"],
-            # Usamos .get() por si 'universe_domain' no está en el JSON original
             "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
         }
 
         # 2. AUTENTICACIÓN
         gc = gspread.service_account_from_dict(gcp_service_account_dict)
 
-        # 3. ACCESO A URLs (que son la misma URL del archivo central)
+        # 3. ACCESO A URLs
         url_archivo_central = st.secrets["cursos_sheet_url"]
-
-        # 4. LECTURA DE DATOS de las tres pestañas
         archivo_sheets = gc.open_by_url(url_archivo_central)
+
+        # 4. LECTURA DE DATOS de las pestañas
         df_alumnos = pd.DataFrame(archivo_sheets.worksheet("alumnos").get_all_records())
         df_cursos = pd.DataFrame(archivo_sheets.worksheet("cursos").get_all_records())
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
+
+        # --- NUEVA LECTURA DE ASIGNACIONES DINÁMICAS ---
+        df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
+        # ------------------------------------------------
 
         # Limpieza: Asegurar que las columnas de notas sean numéricas y sin NaN
         cols_para_limpiar = COLUMNAS_NOTAS
         df_notas_brutas[cols_para_limpiar] = df_notas_brutas[cols_para_limpiar].apply(pd.to_numeric,
                                                                                       errors='coerce').fillna(0)
 
-        # Guardar las columnas originales de df_notas_brutas para el mapeo de guardado
         st.session_state['notas_columns'] = df_notas_brutas.columns.tolist()
 
-        return df_alumnos, df_cursos, df_notas_brutas
+        return df_alumnos, df_cursos, df_notas_brutas, df_instructores
 
     except KeyError as k_e:
         st.error(
             f"Error de configuración. Clave faltante en Streamlit Secrets: {k_e}. Revise la tipografía de todas las claves en la nube.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except gspread.exceptions.APIError as api_e:
         st.error(
             f"Error de API de Google (Permisos/Conexión). Asegúrese de que el correo de la Cuenta de Servicio tiene acceso de Editor al archivo. Detalle: {api_e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except Exception as e:
         st.error(f"Error general al cargar los datos. Detalle: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -133,7 +132,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         return
 
     try:
-        # Reconstrucción de credenciales para el guardado (igual que en load_data_online)
+        # Reconstrucción de credenciales para el guardado
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -155,11 +154,12 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         worksheet = spreadsheet.worksheet("notas")
 
         updates = []
+        # La clave se verifica que exista, sino falla (ver corrección en carga inicial)
         original_cols = st.session_state['notas_columns']
 
         for df_index, col_updates in edited_data['edited_rows'].items():
 
-            gsheet_row_index = df_index + 2  # Fila 1 es encabezado, fila 2 es índice 0
+            gsheet_row_index = df_index + 2
 
             for col_name, new_value in col_updates.items():
 
@@ -195,18 +195,36 @@ st.set_page_config(page_title="Dashboard de Notas Docente (Online)", layout="wid
 # 1. CARGA Y CÁLCULO INICIAL (Se ejecuta y guarda en session_state)
 if 'df_final_completo' not in st.session_state:
     with st.spinner("Cargando y validando datos desde Google Drive..."):
-        df_alumnos_full, df_cursos_full, df_notas_brutas_full = load_data_online()
+        # Ahora load_data_online retorna 4 DataFrames
+        df_alumnos_full, df_cursos_full, df_notas_brutas_full, df_instructores_full = load_data_online()
 
-    if df_alumnos_full.empty or df_cursos_full.empty or df_notas_brutas_full.empty:
+    # Verificación de carga
+    if df_alumnos_full.empty or df_cursos_full.empty or df_notas_brutas_full.empty or df_instructores_full.empty:
+        st.error("No se pudieron cargar todos los datos maestros (incluyendo la lista de instructores).")
         st.stop()
+
+    # --- PROCESAMIENTO DINÁMICO: Crear el diccionario de asignaciones ---
+
+    # Agrupamos por DNI_DOCENTE y listamos los ID_CURSO asignados
+    try:
+        docentes_map = (
+            df_instructores_full.groupby('DNI_DOCENTE')['ID_CURSO']
+            .apply(list)
+            .to_dict()
+        )
+        st.session_state['docentes_asignados_map'] = docentes_map
+    except KeyError:
+        st.error(
+            "Error al procesar la hoja 'instructores'. Asegúrese de que existen las columnas 'DNI_DOCENTE' y 'ID_CURSO' y que no tienen espacios.")
+        st.stop()
+
+    # --- FIN PROCESAMIENTO DINÁMICO ---
 
     df_final_full = integrar_y_calcular(df_alumnos_full, df_cursos_full, df_notas_brutas_full)
 
-    # --- ¡SECCIÓN CORREGIDA AÑADIDA AQUÍ! ---
-    # Guardamos los encabezados de notas en la sesión si aún no existen
+    # Guardamos los encabezados de notas en la sesión (Corrección de KeyError al guardar)
     if 'notas_columns' not in st.session_state and not df_notas_brutas_full.empty:
         st.session_state['notas_columns'] = df_notas_brutas_full.columns.tolist()
-    # ------------------------------------------
 
     st.session_state['df_final_completo'] = df_final_full
     st.session_state['df_notas_base'] = df_notas_brutas_full
@@ -221,34 +239,41 @@ if 'authenticated' not in st.session_state:
 def login_form():
     st.sidebar.header("Inicio de Sesión")
 
+    # Usamos el secreto de la nube para la contraseña
     default_password = st.secrets.get("app_password", "1234")
 
+    # Cargamos el mapa de asignaciones de la sesión
+    docentes_map = st.session_state.get('docentes_asignados_map', {})
+
     with st.sidebar.form("login_form"):
-        dni_input = st.text_input("DNI del Docente (Ej: 17999767)", value="")
+        dni_input = st.text_input("DNI del Docente", value="")
         password_input = st.text_input("Contraseña", type="password")
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            if dni_input in DOCENTES_ASIGNADOS and password_input == default_password:
+            # Validamos contra el mapa de asignaciones cargado de Drive
+            if dni_input in docentes_map and password_input == default_password:
                 st.session_state['authenticated'] = True
                 st.session_state['docente_dni'] = dni_input
                 st.sidebar.success(f"Bienvenido Docente con DNI: {dni_input}")
                 st.rerun()
             else:
-                st.sidebar.error("DNI o Contraseña incorrectos.")
+                st.sidebar.error(
+                    "DNI o Contraseña incorrectos. (Asegúrese de que su DNI esté listado en la hoja 'instructores').")
 
 
 # --- Función principal de Visualización y Edición ---
 def show_dashboard_filtrado(docente_dni):
-    cursos_asignados = DOCENTES_ASIGNADOS.get(docente_dni, [])
+    # Usamos el mapa de asignaciones cargado de Drive
+    docentes_map = st.session_state.get('docentes_asignados_map', {})
+    cursos_asignados = docentes_map.get(docente_dni, [])
 
     if not cursos_asignados:
         st.warning("Usted no tiene cursos asignados en el sistema.")
         return
 
     st.title(f'👩‍🏫 Dashboard Docente - DNI: {docente_dni}')
-    st.info(
-        f"Conectado a Google Sheets. Mostrando datos solo para sus cursos asignados: **{', '.join(cursos_asignados)}**")
+    st.info(f"Conectado a Google Sheets. Mostrando datos solo para sus {len(cursos_asignados)} cursos asignados.")
     st.markdown('***')
 
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
