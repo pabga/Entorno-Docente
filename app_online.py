@@ -8,12 +8,10 @@ from gspread import utils
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
 COLUMNAS_NOTAS = ['Parcial 1', 'Parcial 2']
 ID_ALUMNO = 'DNI'
-# Usamos 'ID_CURSO' para la hoja 'notas' e 'ID_CURSO' en 'instructores' (si lo usaste en drive)
 ID_CURSO_NOTAS = 'ID_CURSO'
-ID_CURSO_MAESTRO = 'D_CURSO'  # Usado en la hoja 'cursos'
+ID_CURSO_MAESTRO = 'D_CURSO'
 
-# NOTA: DOCENTES_ASIGNADOS AHORA SE CARGA DE DRIVE. El diccionario aquí es solo un fallback si falla la carga.
-# Si el código se carga correctamente de Drive, esta variable no se usa.
+# NOTA: DOCENTES_ASIGNADOS AHORA SE CARGA DE DRIVE.
 DOCENTES_ASIGNADOS = {}
 
 
@@ -21,14 +19,14 @@ DOCENTES_ASIGNADOS = {}
 #                         CONEXIÓN Y CARGA DE DATOS REALES (GSPREAD)
 # ----------------------------------------------------------------------
 
-@st.cache_data(ttl=600)  # Cacha los datos por 10 minutos
+@st.cache_data(ttl=600)
 def load_data_online():
     """
-    Carga los DataFrames de Google Sheets reconstruyendo el diccionario de credenciales
-    a partir de las claves planas de st.secrets y retorna también la tabla de instructores.
+    Carga todos los DataFrames necesarios (alumnos, cursos, notas, instructores)
+    reconstruyendo el diccionario de credenciales a partir de las claves planas de st.secrets.
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES (A partir de CLAVES PLANAS de Streamlit Secrets)
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -54,12 +52,10 @@ def load_data_online():
         df_alumnos = pd.DataFrame(archivo_sheets.worksheet("alumnos").get_all_records())
         df_cursos = pd.DataFrame(archivo_sheets.worksheet("cursos").get_all_records())
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
+        df_instructores = pd.DataFrame(
+            archivo_sheets.worksheet("instructores").get_all_records())  # Lectura de credenciales y asignaciones
 
-        # --- NUEVA LECTURA DE ASIGNACIONES DINÁMICAS ---
-        df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
-        # ------------------------------------------------
-
-        # Limpieza: Asegurar que las columnas de notas sean numéricas y sin NaN
+        # Limpieza de notas
         cols_para_limpiar = COLUMNAS_NOTAS
         df_notas_brutas[cols_para_limpiar] = df_notas_brutas[cols_para_limpiar].apply(pd.to_numeric,
                                                                                       errors='coerce').fillna(0)
@@ -101,7 +97,7 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
         how='left'
     )
 
-    # 2. Unir con Cursos (CORREGIDO: Cruza ID_CURSO_NOTAS con ID_CURSO_MAESTRO)
+    # 2. Unir con Cursos (Cruza ID_CURSO_NOTAS con ID_CURSO_MAESTRO)
     df_final = pd.merge(
         df_paso1,
         df_cursos[[ID_CURSO_MAESTRO, 'Asignatura']],
@@ -132,7 +128,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         return
 
     try:
-        # Reconstrucción de credenciales para el guardado
+        # Reconstrucción de credenciales
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -154,7 +150,6 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         worksheet = spreadsheet.worksheet("notas")
 
         updates = []
-        # La clave se verifica que exista, sino falla (ver corrección en carga inicial)
         original_cols = st.session_state['notas_columns']
 
         for df_index, col_updates in edited_data['edited_rows'].items():
@@ -192,30 +187,36 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 st.set_page_config(page_title="Dashboard de Notas Docente (Online)", layout="wide")
 
-# 1. CARGA Y CÁLCULO INICIAL (Se ejecuta y guarda en session_state)
+# 1. CARGA Y CÁLCULO INICIAL (Punto de entrada de datos)
 if 'df_final_completo' not in st.session_state:
     with st.spinner("Cargando y validando datos desde Google Drive..."):
-        # Ahora load_data_online retorna 4 DataFrames
         df_alumnos_full, df_cursos_full, df_notas_brutas_full, df_instructores_full = load_data_online()
 
-    # Verificación de carga
     if df_alumnos_full.empty or df_cursos_full.empty or df_notas_brutas_full.empty or df_instructores_full.empty:
         st.error("No se pudieron cargar todos los datos maestros (incluyendo la lista de instructores).")
         st.stop()
 
-    # --- PROCESAMIENTO DINÁMICO: Crear el diccionario de asignaciones ---
-
-    # Agrupamos por DNI_DOCENTE y listamos los ID_CURSO asignados
+    # --- PROCESAMIENTO DINÁMICO: Crea los diccionarios de asignaciones y claves ---
     try:
-        docentes_map = (
+        # 1. Crear el mapa de asignaciones (DNI -> [Cursos])
+        docentes_asignados_map = (
             df_instructores_full.groupby('DNI_DOCENTE')['ID_CURSO']
             .apply(list)
             .to_dict()
         )
-        st.session_state['docentes_asignados_map'] = docentes_map
-    except KeyError:
+        st.session_state['docentes_asignados_map'] = docentes_asignados_map
+
+        # 2. Crear el mapa de claves (DNI -> Clave_Acceso)
+        docentes_claves_map = (
+            df_instructores_full.groupby('DNI_DOCENTE')['Clave_Acceso']
+            .first()
+            .to_dict()
+        )
+        st.session_state['docentes_claves_map'] = docentes_claves_map
+
+    except KeyError as k_e:
         st.error(
-            "Error al procesar la hoja 'instructores'. Asegúrese de que existen las columnas 'DNI_DOCENTE' y 'ID_CURSO' y que no tienen espacios.")
+            f"Error al procesar la hoja 'instructores'. Asegúrese de que existen las columnas 'DNI_DOCENTE', 'ID_CURSO' y 'Clave_Acceso' y que no tienen espacios. Detalle: {k_e}")
         st.stop()
 
     # --- FIN PROCESAMIENTO DINÁMICO ---
@@ -235,15 +236,13 @@ if 'authenticated' not in st.session_state:
     st.session_state['docente_dni'] = None
 
 
-# --- Función de Login ---
+# --- Función de Login (Validación contra Drive) ---
 def login_form():
     st.sidebar.header("Inicio de Sesión")
 
-    # Usamos el secreto de la nube para la contraseña
-    default_password = st.secrets.get("app_password", "1234")
-
-    # Cargamos el mapa de asignaciones de la sesión
+    # Cargamos los mapas de asignaciones y claves de la sesión
     docentes_map = st.session_state.get('docentes_asignados_map', {})
+    claves_map = st.session_state.get('docentes_claves_map', {})
 
     with st.sidebar.form("login_form"):
         dni_input = st.text_input("DNI del Docente", value="")
@@ -251,20 +250,22 @@ def login_form():
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            # Validamos contra el mapa de asignaciones cargado de Drive
-            if dni_input in docentes_map and password_input == default_password:
-                st.session_state['authenticated'] = True
-                st.session_state['docente_dni'] = dni_input
-                st.sidebar.success(f"Bienvenido Docente con DNI: {dni_input}")
-                st.rerun()
+            # 1. Verificar si el DNI existe en las asignaciones de Drive
+            if dni_input in docentes_map:
+                # 2. Verificar si la clave ingresada coincide con la clave_map de Drive
+                if password_input == claves_map.get(dni_input):
+                    st.session_state['authenticated'] = True
+                    st.session_state['docente_dni'] = dni_input
+                    st.sidebar.success(f"Bienvenido Docente con DNI: {dni_input}")
+                    st.rerun()
+                else:
+                    st.sidebar.error("Contraseña incorrecta.")
             else:
-                st.sidebar.error(
-                    "DNI o Contraseña incorrectos. (Asegúrese de que su DNI esté listado en la hoja 'instructores').")
+                st.sidebar.error("DNI no encontrado o no tiene cursos asignados.")
 
 
 # --- Función principal de Visualización y Edición ---
 def show_dashboard_filtrado(docente_dni):
-    # Usamos el mapa de asignaciones cargado de Drive
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     cursos_asignados = docentes_map.get(docente_dni, [])
 
@@ -273,7 +274,7 @@ def show_dashboard_filtrado(docente_dni):
         return
 
     st.title(f'👩‍🏫 Dashboard Docente - DNI: {docente_dni}')
-    st.info(f"Conectado a Google Sheets. Mostrando datos solo para sus {len(cursos_asignados)} cursos asignados.")
+    st.info(f"Mostrando datos para sus {len(cursos_asignados)} cursos asignados.")
     st.markdown('***')
 
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
