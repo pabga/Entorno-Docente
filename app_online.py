@@ -32,9 +32,9 @@ def load_data_online():
             "private_key": st.secrets["gcp_service_account_private_key"],
             "client_email": st.secrets["gcp_service_account_client_email"],
             "client_id": st.secrets["gcp_service_account_client_id"],
-            "auth_uri": st.secrets["gcp_service_account_auth_uri"],
-            "token_uri": st.secrets["gcp_service_account_token_uri"],
-            "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
+            "auth_uri": st.secrets["accounts.google.com/o/oauth2/auth"],
+            "token_uri": st.secrets["oauth2.googleapis.com/token"],
+            "auth_provider_x509_cert_url": st.secrets["www.googleapis.com/oauth2/v1/certs"],
             "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"],
             "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
         }
@@ -86,6 +86,12 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     if df_alumnos.empty or df_cursos.empty or df_notas.empty:
         return pd.DataFrame()
 
+    # --- CORRECCIÓN DE DNI FALTANTE ---
+    # Eliminar filas de la hoja 'notas' donde el DNI sea vacío o nulo antes del merge
+    df_notas = df_notas[df_notas[ID_ALUMNO].notna()]
+    df_notas = df_notas[df_notas[ID_ALUMNO] != '']
+    # -----------------------------------
+
     # 1. Unir Notas con Alumnos (Usando DNI)
     df_paso1 = pd.merge(
         df_notas,
@@ -133,9 +139,9 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
             "private_key": st.secrets["gcp_service_account_private_key"],
             "client_email": st.secrets["gcp_service_account_client_email"],
             "client_id": st.secrets["gcp_service_account_client_id"],
-            "auth_uri": st.secrets["gcp_service_account_auth_uri"],
-            "token_uri": st.secrets["gcp_service_account_token_uri"],
-            "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
+            "auth_uri": st.secrets["accounts.google.com/o/oauth2/auth"],
+            "token_uri": st.secrets["oauth2.googleapis.com/token"],
+            "auth_provider_x509_cert_url": st.secrets["www.googleapis.com/oauth2/v1/certs"],
             "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"],
             "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
         }
@@ -318,9 +324,13 @@ def show_dashboard_filtrado(docente_dni):
         df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
     ].reset_index(drop=True).copy()
 
+    # Si el filtro no encuentra ninguna nota (porque no hay datos)
     if df_filtrado_docente_base.empty:
         st.warning(
-            f"No se encontraron notas para los cursos asignados: {', '.join(cursos_asignados)}. Por favor, verifique la hoja 'notas' en Google Drive.")
+            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía.")
+
+        # Creamos un DataFrame vacío pero con los metadatos correctos para que el docente pueda empezar a trabajar.
+        # Esto requiere que el docente cree las primeras filas en Drive si la tabla está completamente vacía.
         return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
