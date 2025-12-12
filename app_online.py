@@ -11,7 +11,6 @@ ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 
-# NOTA: DOCENTES_ASIGNADOS AHORA SE CARGA DE DRIVE.
 DOCENTES_ASIGNADOS = {}
 
 
@@ -22,8 +21,7 @@ DOCENTES_ASIGNADOS = {}
 @st.cache_data(ttl=600)
 def load_data_online():
     """
-    Carga todos los DataFrames necesarios reconstruyendo el diccionario de credenciales
-    a partir de las claves planas de st.secrets.
+    Carga todos los DataFrames necesarios reconstruyendo el diccionario de credenciales.
     """
     try:
         # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
@@ -261,7 +259,7 @@ def login_form():
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            # 1. Aseguramos que el DNI ingresado sea un string (aunque text_input ya lo es)
+            # 1. Aseguramos que el DNI ingresado sea un string limpio
             dni_input = str(dni_input).strip()
 
             # 2. Verificar si el DNI existe en las asignaciones de Drive
@@ -282,6 +280,15 @@ def login_form():
 def show_dashboard_filtrado(docente_dni):
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     cursos_asignados = docentes_map.get(docente_dni, [])
+
+    # --- INICIO DIAGNÓSTICO TEMPORAL (¡RECUERDA ELIMINAR ESTO DESPUÉS!) ---
+    st.sidebar.markdown('---')
+    st.sidebar.write("### 🔑 DEBUGGING")
+    st.sidebar.write(f"DNI Logueado: `{docente_dni}`")
+    st.sidebar.write(f"Cursos Asignados Leídos: `{cursos_asignados}`")
+    st.sidebar.json(docentes_map)
+    st.sidebar.markdown('---')
+    # --- FIN DIAGNÓSTICO TEMPORAL ---
 
     if not cursos_asignados:
         st.warning("Usted no tiene cursos asignados en el sistema.")
