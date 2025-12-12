@@ -52,7 +52,7 @@ def load_data_online():
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
         df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
 
-        # Limpieza de notas
+        # Limpieza de notas (Conversión a numérico y NaN a 0)
         cols_para_limpiar = COLUMNAS_NOTAS
         df_notas_brutas[cols_para_limpiar] = df_notas_brutas[cols_para_limpiar].apply(pd.to_numeric,
                                                                                       errors='coerce').fillna(0)
@@ -193,23 +193,29 @@ if 'df_final_completo' not in st.session_state:
         st.error("No se pudieron cargar todos los datos maestros (incluyendo la lista de instructores).")
         st.stop()
 
-    # --- CONVERSIÓN CRÍTICA DE DNI A STRING Y LIMPIEZA ---
+    # --- CONVERSIÓN CRÍTICA DE DNI Y CURSOS A STRING Y LIMPIEZA ---
     try:
-        # Convertir a string y limpiar espacios/puntos para asegurar la coincidencia de login/merge
-
-        def clean_dni(df, col_name):
+        # Función para limpiar columnas de códigos (DNI, ID_CURSO)
+        def clean_code_column(df, col_name):
             if col_name in df.columns:
-                # Convertir a string, eliminar puntos/comas (si existen) y quitar espacios
+                # Convertir a string, eliminar puntos/comas (si existen en DNI) y quitar espacios
                 df[col_name] = df[col_name].astype(str).str.replace(r'[.,]', '', regex=True).str.strip()
             return df
 
 
-        df_instructores_full = clean_dni(df_instructores_full, 'DNI_DOCENTE')
-        df_alumnos_full = clean_dni(df_alumnos_full, 'DNI')
-        df_notas_brutas_full = clean_dni(df_notas_brutas_full, 'DNI')
+        # Limpieza de DNI en todas las hojas relevantes
+        df_instructores_full = clean_code_column(df_instructores_full, 'DNI_DOCENTE')
+        df_alumnos_full = clean_code_column(df_alumnos_full, 'DNI')
+        df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'DNI')
+
+        # Limpieza de IDs de Curso en todas las hojas relevantes
+        df_instructores_full = clean_code_column(df_instructores_full, 'ID_CURSO')
+        df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'ID_CURSO')
+        df_cursos_full = clean_code_column(df_cursos_full, 'D_CURSO')
+
 
     except Exception as e:
-        st.error(f"Error al intentar limpiar y convertir columnas DNI a texto: {e}")
+        st.error(f"Error al intentar limpiar y convertir columnas DNI/Curso a texto: {e}")
         st.stop()
     # ------------------------------------------------------
 
@@ -311,6 +317,11 @@ def show_dashboard_filtrado(docente_dni):
     df_filtrado_docente_base = df_final_completo[
         df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
     ].reset_index(drop=True).copy()
+
+    if df_filtrado_docente_base.empty:
+        st.warning(
+            f"No se encontraron notas para los cursos asignados: {', '.join(cursos_asignados)}. Por favor, verifique la hoja 'notas' en Google Drive.")
+        return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
         df_filtrado_docente_base['Comentarios_Docente'] = ''
