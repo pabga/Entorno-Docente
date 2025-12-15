@@ -216,10 +216,15 @@ if 'df_final_completo' not in st.session_state:
 
     # --- CONVERSIÓN CRÍTICA DE DNI Y CURSOS A STRING Y LIMPIEZA ---
     try:
-        # Función para limpiar columnas de códigos (DNI, ID_CURSO)
+        # Función para limpiar columnas de códigos (DNI, ID_CURSO). AHORA ES AGRESIVA.
         def clean_code_column(df, col_name):
             if col_name in df.columns:
-                df[col_name] = df[col_name].astype(str).str.replace(r'[.,]', '', regex=True).str.strip()
+                # 1. Convertir a string
+                df[col_name] = df[col_name].astype(str)
+                # 2. Eliminar puntos/comas (común en DNI)
+                df[col_name] = df[col_name].str.replace(r'[.,]', '', regex=True)
+                # 3. Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
+                df[col_name] = df[col_name].str.replace(r'\s+', '', regex=True)
             return df
 
 
@@ -233,7 +238,7 @@ if 'df_final_completo' not in st.session_state:
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'ID_CURSO')
         df_cursos_full = clean_code_column(df_cursos_full, 'D_CURSO')
 
-        # CORRECCIÓN: UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS
+        # UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS (Final Step)
         df_instructores_full['ID_CURSO'] = df_instructores_full['ID_CURSO'].str.upper()
         df_notas_brutas_full['ID_CURSO'] = df_notas_brutas_full['ID_CURSO'].str.upper()
         df_cursos_full['D_CURSO'] = df_cursos_full['D_CURSO'].str.upper()
@@ -346,7 +351,7 @@ def show_dashboard_filtrado(docente_dni):
     # Si el filtro no encuentra ninguna nota
     if df_filtrado_docente_base.empty:
         st.warning(
-            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior.")
+            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique **manualmente** que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior (Asegúrese que no tengan espacios internos).")
         return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
