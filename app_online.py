@@ -6,12 +6,13 @@ import json
 from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
-COLUMNAS_NOTAS = ['Parcial 1', 'Parcial 2']
+# COLUMNAS_NOTAS YA NO ES ESTÁTICO, SE CALCULA DINÁMICAMENTE EN load_data_online()
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 
 DOCENTES_ASIGNADOS = {}
+COLUMNAS_NOTAS = []  # Se inicializa vacío y se llena dinámicamente
 
 
 # ----------------------------------------------------------------------
@@ -21,7 +22,7 @@ DOCENTES_ASIGNADOS = {}
 @st.cache_data(ttl=600)
 def load_data_online():
     """
-    Carga todos los DataFrames necesarios reconstruyendo el diccionario de credenciales.
+    Carga todos los DataFrames y determina dinámicamente las columnas de notas.
     """
     try:
         # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
@@ -53,6 +54,13 @@ def load_data_online():
         df_cursos = pd.DataFrame(archivo_sheets.worksheet("cursos").get_all_records())
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
         df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
+
+        # 5. IDENTIFICACIÓN DINÁMICA DE COLUMNAS DE NOTAS
+        columnas_clave = ['DNI', 'ID_CURSO', 'Comentarios_Docente']
+
+        global COLUMNAS_NOTAS  # Hace la variable global para que el resto del código la use
+        COLUMNAS_NOTAS = [col for col in df_notas_brutas.columns.tolist()
+                          if col not in columnas_clave]
 
         # Limpieza de notas (Conversión a numérico y NaN a 0)
         cols_para_limpiar = COLUMNAS_NOTAS
@@ -115,7 +123,10 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     df_final.drop(columns=[ID_CURSO_MAESTRO], inplace=True)
 
     # 3. CÁLCULO DE PROMEDIOS
-    df_final['Promedio_Materia'] = df_final[COLUMNAS_NOTAS].mean(axis=1).round(2)
+    if COLUMNAS_NOTAS:
+        df_final['Promedio_Materia'] = df_final[COLUMNAS_NOTAS].mean(axis=1).round(2)
+    else:
+        df_final['Promedio_Materia'] = 0  # Si no hay columnas de notas, el promedio es 0
 
     return df_final
 
@@ -208,7 +219,6 @@ if 'df_final_completo' not in st.session_state:
         # Función para limpiar columnas de códigos (DNI, ID_CURSO)
         def clean_code_column(df, col_name):
             if col_name in df.columns:
-                # Convertir a string, eliminar puntos/comas (si existen en DNI) y quitar espacios
                 df[col_name] = df[col_name].astype(str).str.replace(r'[.,]', '', regex=True).str.strip()
             return df
 
@@ -218,17 +228,15 @@ if 'df_final_completo' not in st.session_state:
         df_alumnos_full = clean_code_column(df_alumnos_full, 'DNI')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'DNI')
 
-        # Limpieza de IDs de Curso en todas las hojas relevantes (Espacios)
+        # Limpieza de IDs de Curso en todas las hojas relevantes
         df_instructores_full = clean_code_column(df_instructores_full, 'ID_CURSO')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'ID_CURSO')
         df_cursos_full = clean_code_column(df_cursos_full, 'D_CURSO')
 
-        # --- NUEVA CORRECCIÓN: UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS ---
-        # Esto resuelve problemas de mayúsculas/minúsculas en los cruces
+        # CORRECCIÓN: UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS
         df_instructores_full['ID_CURSO'] = df_instructores_full['ID_CURSO'].str.upper()
         df_notas_brutas_full['ID_CURSO'] = df_notas_brutas_full['ID_CURSO'].str.upper()
         df_cursos_full['D_CURSO'] = df_cursos_full['D_CURSO'].str.upper()
-        # ---------------------------------------------------------------
 
 
     except Exception as e:
@@ -355,17 +363,21 @@ def show_dashboard_filtrado(docente_dni):
 
     with st.form("notas_form"):
 
+        # Creación dinámica de la configuración de columnas
+        column_config_dict = {
+            "Comentarios_Docente": st.column_config.TextColumn("Descripción/Comentario (Editable)"),
+            "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
+            "Apellido": st.column_config.TextColumn("Apellido", disabled=True),
+            "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
+            ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
+        }
+        # Agregar las columnas de notas con su configuración de formato y validación
+        for col in COLUMNAS_NOTAS:
+            column_config_dict[col] = st.column_config.NumberColumn(col, min_value=0.0, max_value=10.0, format="%.1f")
+
         df_editado_with_info = st.data_editor(
             df_filtrado_docente_base[columnas_visibles_editor],
-            column_config={
-                "Parcial 1": st.column_config.NumberColumn("Parcial 1", min_value=0.0, max_value=10.0, format="%.1f"),
-                "Parcial 2": st.column_config.NumberColumn("Parcial 2", min_value=0.0, max_value=10.0, format="%.1f"),
-                "Comentarios_Docente": st.column_config.TextColumn("Descripción/Comentario (Editable)"),
-                "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
-                "Apellido": st.column_config.TextColumn("Apellido", disabled=True),
-                "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
-                ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
-            },
+            column_config=column_config_dict,
             hide_index=False,
             use_container_width=True,
             key="editor_notas"
@@ -382,15 +394,18 @@ def show_dashboard_filtrado(docente_dni):
     # 3. RECALCULO DE PROMEDIOS CON LOS DATOS EDITADOS
     df_notas_editadas = df_editado_with_info[['Nombre', 'Apellido'] + COLUMNAS_NOTAS].copy()
 
-    df_notas_editadas['Promedio_Materia'] = df_notas_editadas[COLUMNAS_NOTAS].mean(axis=1).round(2)
+    if COLUMNAS_NOTAS:
+        df_notas_editadas['Promedio_Materia'] = df_notas_editadas[COLUMNAS_NOTAS].mean(axis=1).round(2)
+        df_promedio_docente = df_notas_editadas.groupby(['Nombre', 'Apellido'])['Promedio_Materia'].mean().reset_index()
+        df_promedio_docente.rename(columns={'Promedio_Materia': 'Promedio General de sus Cursos'}, inplace=True)
+        df_promedio_docente = df_promedio_docente.sort_values(by='Promedio General de sus Cursos',
+                                                              ascending=False).round(2)
 
-    df_promedio_docente = df_notas_editadas.groupby(['Nombre', 'Apellido'])['Promedio_Materia'].mean().reset_index()
-    df_promedio_docente.rename(columns={'Promedio_Materia': 'Promedio General de sus Cursos'}, inplace=True)
-    df_promedio_docente = df_promedio_docente.sort_values(by='Promedio General de sus Cursos', ascending=False).round(2)
-
-    # 4. VISTA DE RESULTADOS ACTUALIZADOS
-    st.header('📈 Promedios Actualizados (Post-Edición)')
-    st.dataframe(df_promedio_docente, use_container_width=True)
+        # 4. VISTA DE RESULTADOS ACTUALIZADOS
+        st.header('📈 Promedios Actualizados (Post-Edición)')
+        st.dataframe(df_promedio_docente, use_container_width=True)
+    else:
+        st.warning("No hay columnas de notas para calcular promedios.")
 
 
 # --- EJECUCIÓN PRINCIPAL FINAL ---
