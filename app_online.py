@@ -6,13 +6,13 @@ import json
 from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
-# COLUMNAS_NOTAS YA NO ES ESTÁTICO, SE CALCULA DINÁMICAMENTE EN load_data_online()
+# COLUMNAS_NOTAS es dinámico
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 
 DOCENTES_ASIGNADOS = {}
-COLUMNAS_NOTAS = []  # Se inicializa vacío y se llena dinámicamente
+COLUMNAS_NOTAS = []
 
 
 # ----------------------------------------------------------------------
@@ -58,7 +58,7 @@ def load_data_online():
         # 5. IDENTIFICACIÓN DINÁMICA DE COLUMNAS DE NOTAS
         columnas_clave = ['DNI', 'ID_CURSO', 'Comentarios_Docente']
 
-        global COLUMNAS_NOTAS  # Hace la variable global para que el resto del código la use
+        global COLUMNAS_NOTAS
         COLUMNAS_NOTAS = [col for col in df_notas_brutas.columns.tolist()
                           if col not in columnas_clave]
 
@@ -97,7 +97,6 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
         return pd.DataFrame()
 
     # --- CORRECCIÓN DE DNI FALTANTE ---
-    # Eliminar filas de la hoja 'notas' donde el DNI sea vacío o nulo antes del merge
     df_notas = df_notas[df_notas[ID_ALUMNO].notna()]
     df_notas = df_notas[df_notas[ID_ALUMNO] != '']
     # -----------------------------------
@@ -119,14 +118,13 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
         how='left'
     )
 
-    # Eliminamos la columna duplicada de la clave de cruce
     df_final.drop(columns=[ID_CURSO_MAESTRO], inplace=True)
 
     # 3. CÁLCULO DE PROMEDIOS
     if COLUMNAS_NOTAS:
         df_final['Promedio_Materia'] = df_final[COLUMNAS_NOTAS].mean(axis=1).round(2)
     else:
-        df_final['Promedio_Materia'] = 0  # Si no hay columnas de notas, el promedio es 0
+        df_final['Promedio_Materia'] = 0
 
     return df_final
 
@@ -216,14 +214,13 @@ if 'df_final_completo' not in st.session_state:
 
     # --- CONVERSIÓN CRÍTICA DE DNI Y CURSOS A STRING Y LIMPIEZA ---
     try:
-        # Función para limpiar columnas de códigos (DNI, ID_CURSO). AHORA ES AGRESIVA.
+        # Función para limpiar columnas de códigos (DNI, ID_CURSO). AGRESIVA.
         def clean_code_column(df, col_name):
             if col_name in df.columns:
-                # 1. Convertir a string
                 df[col_name] = df[col_name].astype(str)
-                # 2. Eliminar puntos/comas (común en DNI)
+                # Eliminar puntos/comas (común en DNI)
                 df[col_name] = df[col_name].str.replace(r'[.,]', '', regex=True)
-                # 3. Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
+                # Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
                 df[col_name] = df[col_name].str.replace(r'\s+', '', regex=True)
             return df
 
@@ -302,12 +299,9 @@ def login_form():
         submitted = st.form_submit_button("Ingresar")
 
         if submitted:
-            # 1. Aseguramos que el DNI ingresado sea un string limpio
             dni_input = str(dni_input).strip()
 
-            # 2. Verificar si el DNI existe en las asignaciones de Drive
             if dni_input in docentes_map:
-                # 3. Verificar si la clave ingresada coincide con la clave_map de Drive
                 if password_input == claves_map.get(dni_input):
                     st.session_state['authenticated'] = True
                     st.session_state['docente_dni'] = dni_input
@@ -324,15 +318,27 @@ def show_dashboard_filtrado(docente_dni):
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     cursos_asignados = docentes_map.get(docente_dni, [])
 
-    # --- INICIO DIAGNÓSTICO TEMPORAL (¡RECUERDA ELIMINAR ESTO DESPUÉS!) ---
+    # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
+    df_final_completo = st.session_state['df_final_completo']
+
+    # Códigos encontrados en notas antes de filtrar (Para el diagnóstico)
+    codigos_encontrados_en_notas = df_final_completo[ID_CURSO_NOTAS].unique().tolist()
+
+    # --- INICIO DIAGNÓSTICO TEMPORAL RAW (¡CRÍTICO!) ---
     st.sidebar.markdown('---')
-    st.sidebar.write("### 🔑 DEBUGGING")
+    st.sidebar.write("### 🚨 DEBUGGING CRÍTICO (RAW DATA)")
+
+    st.sidebar.write("**1. Cursos Asignados (Lo que se busca):**")
+    # Usamos repr() para ver si hay \n o espacios ocultos en la lista de búsqueda
+    st.sidebar.code(repr(cursos_asignados))
+
+    st.sidebar.write("**2. Códigos en Hoja NOTAS (Lo que existe):**")
+    # Usamos repr() para ver si hay \n o espacios ocultos en la lista de la hoja NOTAS
+    st.sidebar.code(repr(codigos_encontrados_en_notas))
+
     st.sidebar.write(f"DNI Logueado: `{docente_dni}`")
-    st.sidebar.write(f"Cursos Asignados Leídos: `{cursos_asignados}`")
-    st.sidebar.write(f"Diccionario Completo (DNI -> Cursos):")
-    st.sidebar.json(docentes_map)
     st.sidebar.markdown('---')
-    # --- FIN DIAGNÓSTICO TEMPORAL ---
+    # --- FIN DIAGNÓSTICO TEMPORAL RAW ---
 
     if not cursos_asignados:
         st.warning("Usted no tiene cursos asignados en el sistema.")
@@ -342,8 +348,6 @@ def show_dashboard_filtrado(docente_dni):
     st.info(f"Mostrando datos para sus {len(cursos_asignados)} cursos asignados.")
     st.markdown('***')
 
-    # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
-    df_final_completo = st.session_state['df_final_completo']
     df_filtrado_docente_base = df_final_completo[
         df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
     ].reset_index(drop=True).copy()
@@ -351,7 +355,7 @@ def show_dashboard_filtrado(docente_dni):
     # Si el filtro no encuentra ninguna nota
     if df_filtrado_docente_base.empty:
         st.warning(
-            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique **manualmente** que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior (Asegúrese que no tengan espacios internos).")
+            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique manualmente que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior.")
         return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
@@ -376,7 +380,6 @@ def show_dashboard_filtrado(docente_dni):
             "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
             ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
         }
-        # Agregar las columnas de notas con su configuración de formato y validación
         for col in COLUMNAS_NOTAS:
             column_config_dict[col] = st.column_config.NumberColumn(col, min_value=0.0, max_value=10.0, format="%.1f")
 
