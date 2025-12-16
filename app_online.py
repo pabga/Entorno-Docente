@@ -125,6 +125,7 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     def get_curso_principal(curso_id):
         if pd.isna(curso_id):
             return "OTROS"
+        # Usa regex para obtener las letras/números al inicio (Ej: PPHA, PCA)
         match = re.match(r'^([A-Z0-9]+)', curso_id)
         return match.group(1) if match else "OTROS"
 
@@ -209,7 +210,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 
 # ----------------------------------------------------------------------
-#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN (CORREGIDA FINAL)
+#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN (FINAL CORREGIDA)
 # ----------------------------------------------------------------------
 
 def add_new_exam_column(new_column_name):
@@ -241,26 +242,22 @@ def add_new_exam_column(new_column_name):
 
         # 1. Encontrar la columna 'Comentarios_Docente' para la posición
         try:
-            # Índice basado en 0 de Python
             comentarios_index_py = st.session_state['notas_columns'].index('Comentarios_Docente')
-            # Índice basado en 1 para Gspread (columna donde se inserta, ANTES de comentarios)
             insert_col_index = comentarios_index_py + 1
         except ValueError:
-            # Si no existe, insertar al final (índice 1-based)
             insert_col_index = len(st.session_state['notas_columns']) + 1
 
-        # 2. Insertar una columna completamente vacía (lista de listas vacía)
-        # Esto soluciona el error "got multiple values for argument 'values'"
+        # 2. Insertar una columna completamente vacía (SOLUCIÓN DEL ERROR)
+        # Eliminamos 'inherit=False' y solo insertamos la columna
         worksheet.insert_cols(
             [[]],
-            col=insert_col_index,
-            inherit=False
+            col=insert_col_index
+            # 'inherit' ya no se usa
         )
 
         # 3. Actualizar la celda del encabezado de forma segura (Fila 1)
-        # El índice de columna es el mismo que usamos para la inserción
         worksheet.update_cell(
-            1,  # Fila 1 (Encabezado)
+            1,
             insert_col_index,
             new_column_name
         )
