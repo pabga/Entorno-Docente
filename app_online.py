@@ -6,13 +6,12 @@ import json
 from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
-# COLUMNAS_NOTAS es dinámico
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 
 DOCENTES_ASIGNADOS = {}
-COLUMNAS_NOTAS = []
+COLUMNAS_NOTAS = []  # Se inicializa vacío y se llena dinámicamente
 
 
 # ----------------------------------------------------------------------
@@ -218,9 +217,9 @@ if 'df_final_completo' not in st.session_state:
         def clean_code_column(df, col_name):
             if col_name in df.columns:
                 df[col_name] = df[col_name].astype(str)
-                # Eliminar puntos/comas (común en DNI)
+                # 1. Eliminar puntos/comas (común en DNI)
                 df[col_name] = df[col_name].str.replace(r'[.,]', '', regex=True)
-                # Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
+                # 2. Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
                 df[col_name] = df[col_name].str.replace(r'\s+', '', regex=True)
             return df
 
@@ -316,7 +315,17 @@ def login_form():
 # --- Función principal de Visualización y Edición ---
 def show_dashboard_filtrado(docente_dni):
     docentes_map = st.session_state.get('docentes_asignados_map', {})
-    cursos_asignados = docentes_map.get(docente_dni, [])
+    cursos_asignados_raw = docentes_map.get(docente_dni, [])
+
+    # --- LIMPIEZA EXTREMA DE LA LISTA DE CURSOS ASIGNADOS PARA FILTRADO ---
+    # Convertimos la lista RAW a una lista limpia para evitar errores de coincidencia en el filtro
+    cursos_asignados = []
+    for c in cursos_asignados_raw:
+        # Aplicar limpieza extrema: eliminar puntos/comas, eliminar cualquier espacio, convertir a MAYÚSCULAS
+        if isinstance(c, str):
+            c_limpio = c.replace('.', '').replace(',', '').replace(' ', '').upper()
+            cursos_asignados.append(c_limpio)
+        # Nota: Ya se hizo esta limpieza en el bloque de carga, pero se repite aquí como última garantía.
 
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
     df_final_completo = st.session_state['df_final_completo']
@@ -328,12 +337,11 @@ def show_dashboard_filtrado(docente_dni):
     st.sidebar.markdown('---')
     st.sidebar.write("### 🚨 DEBUGGING CRÍTICO (RAW DATA)")
 
-    st.sidebar.write("**1. Cursos Asignados (Lo que se busca):**")
-    # Usamos repr() para ver si hay \n o espacios ocultos en la lista de búsqueda
+    st.sidebar.write("**1. Cursos Asignados (LISTA FINAL DE BÚSQUEDA):**")
+    # Muestra la lista limpia que realmente se usa para el filtro ISIN
     st.sidebar.code(repr(cursos_asignados))
 
-    st.sidebar.write("**2. Códigos en Hoja NOTAS (Lo que existe):**")
-    # Usamos repr() para ver si hay \n o espacios ocultos en la lista de la hoja NOTAS
+    st.sidebar.write("**2. Códigos en Hoja NOTAS (Lo que existe en el DataFrame limpio):**")
     st.sidebar.code(repr(codigos_encontrados_en_notas))
 
     st.sidebar.write(f"DNI Logueado: `{docente_dni}`")
@@ -355,7 +363,7 @@ def show_dashboard_filtrado(docente_dni):
     # Si el filtro no encuentra ninguna nota
     if df_filtrado_docente_base.empty:
         st.warning(
-            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. Verifique manualmente que los códigos de curso en la hoja 'notas' coincidan exactamente con la lista superior.")
+            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. VERIFICACIÓN: La lista de cursos que está buscando **NO EXISTE** en la hoja `notas`.")
         return
 
     if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
