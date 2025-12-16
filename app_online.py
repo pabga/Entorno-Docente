@@ -7,6 +7,7 @@ import re
 from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
+# Mantenemos las variables por si el código las usa, pero la lógica ahora será por índice
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
@@ -26,7 +27,7 @@ def load_data_online():
     Carga todos los DataFrames y determina dinámicamente las columnas de notas.
     """
     try:
-        # 1. RECONSTRUCCIÓN DEL DICCIONARIO DE CREDENCIALES
+        # 1. RECONSTRUCCIÓN DEL DICCIONARIOS DE CREDENCIALES (Omitido por brevedad)
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -56,12 +57,35 @@ def load_data_online():
         df_notas_brutas = pd.DataFrame(archivo_sheets.worksheet("notas").get_all_records())
         df_instructores = pd.DataFrame(archivo_sheets.worksheet("instructores").get_all_records())
 
-        # 5. IDENTIFICACIÓN DINÁMICA DE COLUMNAS DE NOTAS
-        columnas_clave = ['DNI', 'ID_CURSO', 'Comentarios_Docente']
-
+        # --- 5. IDENTIFICACIÓN DE COLUMNAS DE NOTAS (POR ÍNDICE) ---
         global COLUMNAS_NOTAS
-        COLUMNAS_NOTAS = [col for col in df_notas_brutas.columns.tolist()
-                          if col not in columnas_clave]
+
+        column_names = df_notas_brutas.columns.tolist()
+
+        # Encontramos la posición de las columnas clave
+        try:
+            # Índice de la columna ID_CURSO (basado en el nombre)
+            id_curso_index = column_names.index(ID_CURSO_NOTAS)
+            # Índice de la columna Comentarios_Docente (basado en el nombre)
+            comentarios_index = column_names.index('Comentarios_Docente')
+
+            # Asumimos que las columnas de NOTA están ENTRE ID_CURSO y Comentarios_Docente
+            # El slicing de Python es [inicio:fin-1]
+            COLUMNAS_NOTAS = column_names[id_curso_index + 1: comentarios_index]
+
+        except ValueError as e:
+            # Si falta una columna clave (DNI, ID_CURSO o Comentarios_Docente), el filtrado falla
+            # Pero forzamos a que las notas sean las del medio si existe DNI y ID_CURSO
+            st.warning(f"Falta una columna clave en la hoja 'notas' ({e}). Se intentará identificar notas por índice.")
+
+            # Asumimos que las primeras 2 son claves y las demás notas, si no se encuentra 'Comentarios'
+            if len(column_names) > 2:
+                # Esta es la lógica de respaldo si no encuentra una clave: Asume las del medio
+                COLUMNAS_NOTAS = column_names[2:-1]  # Desde la 3ra columna hasta la penúltima
+            else:
+                COLUMNAS_NOTAS = []  # Si hay 2 o menos columnas, no hay notas
+
+        # -------------------------------------------------------------------
 
         # Limpieza de notas (Conversión a numérico y NaN a 0)
         cols_para_limpiar = COLUMNAS_NOTAS
@@ -73,12 +97,10 @@ def load_data_online():
         return df_alumnos, df_cursos, df_notas_brutas, df_instructores
 
     except KeyError as k_e:
-        st.error(
-            f"Error de configuración. Clave faltante en Streamlit Secrets: {k_e}. Revise la tipografía de todas las claves en la nube.")
+        st.error(f"Error de configuración. Clave faltante en Streamlit Secrets: {k_e}.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except gspread.exceptions.APIError as api_e:
-        st.error(
-            f"Error de API de Google (Permisos/Conexión). Asegúrese de que el correo de la Cuenta de Servicio tiene acceso de Editor al archivo. Detalle: {api_e}")
+        st.error(f"Error de API de Google (Permisos/Conexión). Detalle: {api_e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except Exception as e:
         st.error(f"Error general al cargar los datos. Detalle: {e}")
@@ -103,6 +125,11 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     # -----------------------------------
 
     # 1. Unir Notas con Alumnos (Usando DNI)
+    # CRÍTICO: Asegurarse de que las columnas clave existen.
+    if ID_ALUMNO not in df_notas.columns or ID_ALUMNO not in df_alumnos.columns:
+        st.error(f"ERROR: Falta la columna clave '{ID_ALUMNO}' en la hoja 'notas' o 'alumnos'. Verifique encabezados.")
+        return pd.DataFrame()
+
     df_paso1 = pd.merge(
         df_notas,
         df_alumnos[[ID_ALUMNO, 'Nombre', 'Apellido']],
@@ -111,6 +138,11 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     )
 
     # 2. Unir con Cursos (Cruza ID_CURSO_NOTAS con ID_CURSO_MAESTRO)
+    if ID_CURSO_NOTAS not in df_paso1.columns or ID_CURSO_MAESTRO not in df_cursos.columns:
+        st.error(
+            f"ERROR: Falta la columna clave '{ID_CURSO_NOTAS}' en la hoja 'notas' o '{ID_CURSO_MAESTRO}' en la hoja 'cursos'.")
+        return pd.DataFrame()
+
     df_final = pd.merge(
         df_paso1,
         df_cursos[[ID_CURSO_MAESTRO, 'Asignatura']],
@@ -125,7 +157,6 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     def get_curso_principal(curso_id):
         if pd.isna(curso_id):
             return "OTROS"
-        # Usa regex para obtener las letras/números al inicio (Ej: PPHA, PCA)
         match = re.match(r'^([A-Z0-9]+)', curso_id)
         return match.group(1) if match else "OTROS"
 
@@ -154,7 +185,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
         return
 
     try:
-        # Reconstrucción de credenciales para el guardado
+        # Reconstrucción de credenciales para el guardado (Omitido por brevedad)
         gcp_service_account_dict = {
             "type": st.secrets["gcp_service_account_type"],
             "project_id": st.secrets["gcp_service_account_project_id"],
@@ -210,7 +241,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 
 # ----------------------------------------------------------------------
-#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN (FINAL CORREGIDA)
+#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN
 # ----------------------------------------------------------------------
 
 def add_new_exam_column(new_column_name):
@@ -247,12 +278,10 @@ def add_new_exam_column(new_column_name):
         except ValueError:
             insert_col_index = len(st.session_state['notas_columns']) + 1
 
-        # 2. Insertar una columna completamente vacía (SOLUCIÓN DEL ERROR)
-        # Eliminamos 'inherit=False' y solo insertamos la columna
+        # 2. Insertar una columna completamente vacía (sin 'inherit=False')
         worksheet.insert_cols(
             [[]],
             col=insert_col_index
-            # 'inherit' ya no se usa
         )
 
         # 3. Actualizar la celda del encabezado de forma segura (Fila 1)
@@ -428,6 +457,7 @@ def show_dashboard_filtrado(docente_dni):
     st.sidebar.write("**2. Códigos en Hoja NOTAS (EXISTENCIA LIMPIA):**")
     st.sidebar.code(repr(codigos_encontrados_en_notas))
     st.sidebar.write(f"Cursos Principales (PESTAÑAS): {cursos_principales_asignados}")
+    st.sidebar.write(f"COLUMNAS_NOTAS detectadas: {COLUMNAS_NOTAS}")
     st.sidebar.markdown('---')
     # --- FIN DEBUGGING ---
 
