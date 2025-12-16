@@ -3,13 +3,14 @@ import pandas as pd
 import gspread
 import numpy as np
 import json
+import re  # Necesario para la función integrar_y_calcular
 from gspread import utils
 
 # --- CONFIGURACIÓN DE COLUMNAS Y DATOS MAESTROS ---
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
-CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'  # Nueva columna para la agrupación jerárquica
+CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'  # Columna para la agrupación jerárquica
 
 DOCENTES_ASIGNADOS = {}
 COLUMNAS_NOTAS = []
@@ -121,12 +122,10 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
     df_final.drop(columns=[ID_CURSO_MAESTRO], inplace=True)
 
     # --- PASO CRÍTICO: CREAR EL CURSO PRINCIPAL ---
-    # Asume que el Curso Principal son las letras antes del primer guion o número.
     def get_curso_principal(curso_id):
         if pd.isna(curso_id):
             return "OTROS"
-        # Busca el primer grupo de letras seguidas antes de un número o guion
-        import re
+        # Busca el primer grupo de letras y/o números al inicio del código
         match = re.match(r'^([A-Z0-9]+)', curso_id)
         return match.group(1) if match else "OTROS"
 
@@ -211,12 +210,84 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 
 # ----------------------------------------------------------------------
+#             NUEVA FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN
+# ----------------------------------------------------------------------
+
+def add_new_exam_column(new_column_name):
+    """Añade una nueva columna a la hoja 'notas' y refresca la aplicación."""
+    try:
+        if new_column_name in st.session_state['notas_columns']:
+            st.warning(f"La columna '{new_column_name}' ya existe en la hoja de notas.")
+            return
+
+        gcp_service_account_dict = {
+            # ... (Reconstrucción de credenciales para el guardado) ...
+            "type": st.secrets["gcp_service_account_type"],
+            "project_id": st.secrets["gcp_service_account_project_id"],
+            "private_key_id": st.secrets["gcp_service_account_private_key_id"],
+            "private_key": st.secrets["gcp_service_account_private_key"],
+            "client_email": st.secrets["gcp_service_account_client_email"],
+            "client_id": st.secrets["gcp_service_account_client_id"],
+            "auth_uri": st.secrets["gcp_service_account_auth_uri"],
+            "token_uri": st.secrets["gcp_service_account_token_uri"],
+            "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
+            "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"],
+            "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
+        }
+
+        gc = gspread.service_account_from_dict(gcp_service_account_dict)
+        url_archivo_central = st.secrets["cursos_sheet_url"]
+
+        spreadsheet = gc.open_by_url(url_archivo_central)
+        worksheet = spreadsheet.worksheet("notas")
+
+        # 1. Encontrar la columna 'Comentarios_Docente' para insertar ANTES (o insertar al final si no existe)
+        try:
+            comentarios_index = st.session_state['notas_columns'].index('Comentarios_Docente')
+            # Insertar justo antes de Comentarios_Docente o al final
+            insert_col_index = comentarios_index + 1
+        except ValueError:
+            # Si no existe, insertar al final
+            insert_col_index = len(st.session_state['notas_columns']) + 1
+
+        # 2. Insertar la nueva columna con el nombre provisto
+        worksheet.insert_cols([[]], col=insert_col_index, values=[new_column_name], inherit=False)
+
+        st.success(f"✅ Columna '{new_column_name}' añadida exitosamente a la hoja de notas.")
+
+        # 3. Forzar la recarga de datos para que la nueva columna aparezca en el dashboard
+        st.cache_data.clear()
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"Error al añadir la columna. Asegúrese de que el nombre es válido. Detalle: {e}")
+
+
+# ----------------------------------------------------------------------
 #                         EJECUCIÓN PRINCIPAL Y STREAMLIT
 # ----------------------------------------------------------------------
 
 st.set_page_config(page_title="Dashboard de Notas Docente (Online)", layout="wide")
 
-# 1. CARGA Y CÁLCULO INICIAL (Punto de entrada de datos)
+# --- Formulario de Agregar Examen en la Sidebar (Acción crítica) ---
+st.sidebar.markdown('---')
+st.sidebar.header("➕ Añadir Columna de Evaluación")
+st.sidebar.warning("¡Esto modificará la hoja de 'notas' en Google Drive!")
+
+with st.sidebar.form("add_exam_form"):
+    exam_name = st.text_input("Nombre de la nueva Evaluación (Ej: Examen Final)", key="exam_name_input")
+    submit_exam = st.form_submit_button("Añadir Columna")
+
+    if submit_exam and exam_name:
+        # Limpiar el nombre de la columna antes de enviar
+        cleaned_exam_name = exam_name.strip()
+        add_new_exam_column(cleaned_exam_name)
+    elif submit_exam and not exam_name:
+        st.sidebar.error("Ingrese un nombre para la evaluación.")
+# --------------------------------------------------------------------
+
+
+# 1. CARGA Y CÁLCULO INICIAL
 if 'df_final_completo' not in st.session_state:
     with st.spinner("Cargando y validando datos desde Google Drive..."):
         df_alumnos_full, df_cursos_full, df_notas_brutas_full, df_instructores_full = load_data_online()
@@ -225,7 +296,7 @@ if 'df_final_completo' not in st.session_state:
         st.error("No se pudieron cargar todos los datos maestros (incluyendo la lista de instructores).")
         st.stop()
 
-    # --- CONVERSIÓN CRÍTICA DE DNI Y CURSOS A STRING Y LIMPIEZA ---
+    # --- LIMPIEZA INICIAL ---
     try:
         def clean_code_column(df, col_name):
             if col_name in df.columns:
@@ -250,9 +321,8 @@ if 'df_final_completo' not in st.session_state:
     except Exception as e:
         st.error(f"Error al intentar limpiar y convertir columnas DNI/Curso a texto: {e}")
         st.stop()
-    # ------------------------------------------------------
 
-    # --- PROCESAMIENTO DINÁMICO: Crea los diccionarios de asignaciones y claves ---
+    # --- PROCESAMIENTO DINÁMICO ---
     try:
         docentes_asignados_map = (
             df_instructores_full.groupby('DNI_DOCENTE')['ID_CURSO']
@@ -328,10 +398,14 @@ def show_dashboard_filtrado(docente_dni):
 
     # --- CÁLCULO DE PESTAÑAS DINÁMICAS (Cursos Principales) ---
     # Obtenemos todos los cursos principales únicos que el docente tiene asignados.
-    cursos_principales_asignados = df_final_completo[df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)][
-        CURSO_PRINCIPAL].unique().tolist()
 
-    # Si el docente tiene asignaciones, pero no hay notas para ninguna de ellas, usamos los principales de su lista RAW
+    # Primero, filtramos el DF completo SOLO por los IDs de curso que el docente tiene asignados
+    df_cursos_asignados_filtrado = df_final_completo[df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)]
+
+    # Luego, extraemos los cursos principales de esa lista filtrada
+    cursos_principales_asignados = df_cursos_asignados_filtrado[CURSO_PRINCIPAL].unique().tolist()
+
+    # Si el docente tiene asignaciones, pero no hay notas para ninguna de ellas, generamos los principales desde su lista RAW
     if not cursos_principales_asignados and cursos_asignados:
         cursos_principales_asignados = [c.split('-')[0] for c in cursos_asignados]
         cursos_principales_asignados = sorted(list(set(cursos_principales_asignados)))
@@ -364,7 +438,6 @@ def show_dashboard_filtrado(docente_dni):
     # INICIO DE ESTRUCTURA DE PESTAÑAS DINÁMICAS
     # -----------------------------------------------------------
 
-    # Creamos un objeto de tabs, usando la lista DINÁMICA de cursos principales
     tabs = st.tabs(cursos_principales_asignados)
 
     for i, curso_principal_id in enumerate(cursos_principales_asignados):
@@ -378,7 +451,7 @@ def show_dashboard_filtrado(docente_dni):
                 (df_final_completo[CURSO_PRINCIPAL] == curso_principal_id)
             ].copy()
 
-            # Filtramos *además* para asegurarnos que solo vemos las submaterias que el DOCENTE tiene ASIGNADAS
+            # Filtramos *además* para asegurar que solo vemos las submaterias que el DOCENTE tiene ASIGNADAS
             df_filtrado_docente = df_filtrado_principal[
                 df_filtrado_principal[ID_CURSO_NOTAS].isin(cursos_asignados)
             ].reset_index(drop=True).copy()
