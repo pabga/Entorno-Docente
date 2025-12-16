@@ -209,7 +209,7 @@ def save_data_to_gsheet(df_original_notas_base, edited_data):
 
 
 # ----------------------------------------------------------------------
-#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN (CORREGIDA)
+#             FUNCIÓN: AÑADIR COLUMNA DE EVALUACIÓN (CORREGIDA FINAL)
 # ----------------------------------------------------------------------
 
 def add_new_exam_column(new_column_name):
@@ -239,33 +239,41 @@ def add_new_exam_column(new_column_name):
         spreadsheet = gc.open_by_url(url_archivo_central)
         worksheet = spreadsheet.worksheet("notas")
 
-        # 1. Encontrar la columna 'Comentarios_Docente'
+        # 1. Encontrar la columna 'Comentarios_Docente' para la posición
         try:
-            # Obtener el índice de la columna en la lista de encabezados de la sesión
-            comentarios_index = st.session_state['notas_columns'].index('Comentarios_Docente')
-            # Insertar justo ANTES de Comentarios_Docente (el índice de columna es 1-based, no 0-based)
-            insert_col_index = comentarios_index + 1
+            # Índice basado en 0 de Python
+            comentarios_index_py = st.session_state['notas_columns'].index('Comentarios_Docente')
+            # Índice basado en 1 para Gspread (columna donde se inserta, ANTES de comentarios)
+            insert_col_index = comentarios_index_py + 1
         except ValueError:
-            # Si no existe, insertar al final
+            # Si no existe, insertar al final (índice 1-based)
             insert_col_index = len(st.session_state['notas_columns']) + 1
 
-        # 2. Insertar la nueva columna.
-        # CORRECCIÓN: Usar solo el argumento 'values' correctamente anidado para el encabezado.
+        # 2. Insertar una columna completamente vacía (lista de listas vacía)
+        # Esto soluciona el error "got multiple values for argument 'values'"
         worksheet.insert_cols(
-            [[]],  # Lista vacía de filas para insertar
+            [[]],
             col=insert_col_index,
-            values=[[new_column_name]],  # Aquí debe ser [[Nombre]] para la primera celda
             inherit=False
         )
 
-        st.success(f"✅ Columna '{new_column_name}' añadida exitosamente a la hoja de notas.")
+        # 3. Actualizar la celda del encabezado de forma segura (Fila 1)
+        # El índice de columna es el mismo que usamos para la inserción
+        worksheet.update_cell(
+            1,  # Fila 1 (Encabezado)
+            insert_col_index,
+            new_column_name
+        )
 
-        # 3. Forzar la recarga de datos
+        st.success(
+            f"✅ Columna '{new_column_name}' añadida exitosamente a la hoja de notas en la posición {insert_col_index}.")
+
+        # 4. Forzar la recarga de datos
         st.cache_data.clear()
         st.rerun()
 
     except Exception as e:
-        st.error(f"Error al añadir la columna. Asegúrese de que el nombre es válido. Detalle: {e}")
+        st.error(f"Error CRÍTICO al añadir la columna. Detalle: {e}")
 
 
 # ----------------------------------------------------------------------
