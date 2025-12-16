@@ -11,7 +11,12 @@ ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 
 DOCENTES_ASIGNADOS = {}
-COLUMNAS_NOTAS = []  # Se inicializa vacío y se llena dinámicamente
+COLUMNAS_NOTAS = []
+
+# --- LISTA MAESTRA DE PESTAÑAS (Fija) ---
+# Define los 5 cursos que siempre aparecerán como pestañas.
+# ASEGÚRATE DE QUE ESTOS IDs COINCIDAN CON LOS CÓDIGOS LIMPIOS (SIN ESPACIOS, EN MAYÚSCULAS)
+CURSOS_PESTANAS_MAESTRO = ['PPHA-IS-2025-P', 'PPHA-IS-2025-F', 'PPHA-ME-2025-P', 'PPHA-ME-2025-F', 'PPHA-NA-2025-P']
 
 
 # ----------------------------------------------------------------------
@@ -217,9 +222,7 @@ if 'df_final_completo' not in st.session_state:
         def clean_code_column(df, col_name):
             if col_name in df.columns:
                 df[col_name] = df[col_name].astype(str)
-                # 1. Eliminar puntos/comas (común en DNI)
                 df[col_name] = df[col_name].str.replace(r'[.,]', '', regex=True)
-                # 2. Eliminar CUALQUIER espacio o caracter invisible (interno o externo)
                 df[col_name] = df[col_name].str.replace(r'\s+', '', regex=True)
             return df
 
@@ -267,11 +270,9 @@ if 'df_final_completo' not in st.session_state:
         st.error(
             f"Error al procesar la hoja 'instructores'. Asegúrese de que existen las columnas 'DNI_DOCENTE', 'ID_CURSO' y 'Clave_Acceso' y que no tienen espacios. Detalle: {k_e}")
         st.stop()
-    # --- FIN PROCESAMIENTO DINÁMICO ---
 
     df_final_full = integrar_y_calcular(df_alumnos_full, df_cursos_full, df_notas_brutas_full)
 
-    # Guardamos los encabezados de notas en la sesión (Corrección de KeyError al guardar)
     if 'notas_columns' not in st.session_state and not df_notas_brutas_full.empty:
         st.session_state['notas_columns'] = df_notas_brutas_full.columns.tolist()
 
@@ -288,7 +289,6 @@ if 'authenticated' not in st.session_state:
 def login_form():
     st.sidebar.header("Inicio de Sesión")
 
-    # Cargamos los mapas de asignaciones y claves de la sesión
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     claves_map = st.session_state.get('docentes_claves_map', {})
 
@@ -317,111 +317,122 @@ def show_dashboard_filtrado(docente_dni):
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     cursos_asignados_raw = docentes_map.get(docente_dni, [])
 
-    # --- LIMPIEZA EXTREMA DE LA LISTA DE CURSOS ASIGNADOS PARA FILTRADO ---
-    # Convertimos la lista RAW a una lista limpia para evitar errores de coincidencia en el filtro
-    cursos_asignados = []
-    for c in cursos_asignados_raw:
-        # Aplicar limpieza extrema: eliminar puntos/comas, eliminar cualquier espacio, convertir a MAYÚSCULAS
-        if isinstance(c, str):
-            c_limpio = c.replace('.', '').replace(',', '').replace(' ', '').upper()
-            cursos_asignados.append(c_limpio)
-        # Nota: Ya se hizo esta limpieza en el bloque de carga, pero se repite aquí como última garantía.
+    # Pre-limpieza de la lista de asignados antes de usarla en el filtro
+    cursos_asignados = [c.replace('.', '').replace(',', '').replace(' ', '').upper() for c in cursos_asignados_raw if
+                        isinstance(c, str)]
 
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
     df_final_completo = st.session_state['df_final_completo']
 
-    # Códigos encontrados en notas antes de filtrar (Para el diagnóstico)
+    # --- DEBUGGING Y RAW DATA ---
     codigos_encontrados_en_notas = df_final_completo[ID_CURSO_NOTAS].unique().tolist()
 
-    # --- INICIO DIAGNÓSTICO TEMPORAL RAW (¡CRÍTICO!) ---
     st.sidebar.markdown('---')
     st.sidebar.write("### 🚨 DEBUGGING CRÍTICO (RAW DATA)")
-
-    st.sidebar.write("**1. Cursos Asignados (LISTA FINAL DE BÚSQUEDA):**")
-    # Muestra la lista limpia que realmente se usa para el filtro ISIN
+    st.sidebar.write("**1. Cursos Asignados (BÚSQUEDA LIMPIA):**")
     st.sidebar.code(repr(cursos_asignados))
-
-    st.sidebar.write("**2. Códigos en Hoja NOTAS (Lo que existe en el DataFrame limpio):**")
+    st.sidebar.write("**2. Códigos en Hoja NOTAS (EXISTENCIA LIMPIA):**")
     st.sidebar.code(repr(codigos_encontrados_en_notas))
-
     st.sidebar.write(f"DNI Logueado: `{docente_dni}`")
     st.sidebar.markdown('---')
-    # --- FIN DIAGNÓSTICO TEMPORAL RAW ---
-
-    if not cursos_asignados:
-        st.warning("Usted no tiene cursos asignados en el sistema.")
-        return
+    # --- FIN DEBUGGING ---
 
     st.title(f'👩‍🏫 Dashboard Docente - DNI: {docente_dni}')
-    st.info(f"Mostrando datos para sus {len(cursos_asignados)} cursos asignados.")
+    st.info(f"Mostrando el estado de los {len(CURSOS_PESTANAS_MAESTRO)} cursos principales.")
     st.markdown('***')
 
-    df_filtrado_docente_base = df_final_completo[
+    # -----------------------------------------------------------
+    # INICIO DE ESTRUCTURA DE PESTAÑAS FIJAS
+    # -----------------------------------------------------------
+
+    # Creamos un objeto de tabs, usando la lista MAESTRA de cursos
+    tabs = st.tabs(CURSOS_PESTANAS_MAESTRO)
+
+    for i, curso_id in enumerate(CURSOS_PESTANAS_MAESTRO):
+        with tabs[i]:
+            st.header(f"Notas de la Materia: {curso_id}")
+
+            # --- VERIFICACIÓN DE ASIGNACIÓN ---
+            if curso_id not in cursos_asignados:
+                st.error(f"⛔️ Usted no tiene esta materia asignada ({curso_id}) según la hoja 'instructores'.")
+                continue
+
+            # --- 1. FILTRADO: SOLO EL CURSO ACTUAL (Y ASIGNADO) ---
+            df_filtrado_curso = df_final_completo[
+                df_final_completo[ID_CURSO_NOTAS] == curso_id
+                ].reset_index(drop=True).copy()
+
+            if df_filtrado_curso.empty:
+                st.warning(f"⚠️ ¡Curso Asignado! Pero no hay notas registradas en la hoja 'notas' para {curso_id}.")
+                continue
+
+            # Preparamos las columnas
+            if 'Comentarios_Docente' not in df_filtrado_curso.columns:
+                df_filtrado_curso['Comentarios_Docente'] = ''
+
+            # 2. INTERFAZ DE EDICIÓN
+            columnas_visibles_editor = ['Nombre', 'Apellido', 'Asignatura', ID_CURSO_NOTAS] + COLUMNAS_NOTAS + [
+                'Comentarios_Docente']
+
+            st.subheader('📝 Edición de Notas')
+
+            with st.form(f"notas_form_{curso_id}"):
+
+                # Creación dinámica de la configuración de columnas
+                column_config_dict = {
+                    "Comentarios_Docente": st.column_config.TextColumn("Descripción/Comentario (Editable)"),
+                    "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
+                    "Apellido": st.column_config.TextColumn("Apellido", disabled=True),
+                    "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
+                    ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
+                }
+                for col in COLUMNAS_NOTAS:
+                    column_config_dict[col] = st.column_config.NumberColumn(col, min_value=0.0, max_value=10.0,
+                                                                            format="%.1f")
+
+                df_editado_with_info = st.data_editor(
+                    df_filtrado_curso[columnas_visibles_editor],
+                    column_config=column_config_dict,
+                    hide_index=False,
+                    use_container_width=True,
+                    key=f"editor_notas_{curso_id}"
+                )
+
+                save_button = st.form_submit_button(f"💾 Guardar Cambios para {curso_id}")
+
+                if save_button:
+                    edited_data = st.session_state[f"editor_notas_{curso_id}"]
+                    save_data_to_gsheet(st.session_state['df_notas_base'], edited_data)
+
+            st.markdown('***')
+
+    # -----------------------------------------------------------
+    # FIN DE ESTRUCTURA DE PESTAÑAS (TABS)
+    # -----------------------------------------------------------
+
+    # 4. RECALCULO Y VISTA DE PROMEDIOS GENERALES (Fuera de los tabs)
+    st.header('📈 Promedios Actualizados (General del Docente)')
+
+    df_para_promedio_general = df_final_completo[
         df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)
-    ].reset_index(drop=True).copy()
+    ].copy()
 
-    # Si el filtro no encuentra ninguna nota
-    if df_filtrado_docente_base.empty:
-        st.warning(
-            f"No se encontraron notas registradas en la hoja 'notas' para los cursos asignados: {', '.join(cursos_asignados)}. La tabla está vacía. VERIFICACIÓN: La lista de cursos que está buscando **NO EXISTE** en la hoja `notas`.")
-        return
+    if COLUMNAS_NOTAS and not df_para_promedio_general.empty:
+        df_para_promedio_general['Promedio_Materia'] = df_para_promedio_general[COLUMNAS_NOTAS].mean(axis=1).round(2)
 
-    if 'Comentarios_Docente' not in df_filtrado_docente_base.columns:
-        df_filtrado_docente_base['Comentarios_Docente'] = ''
-
-    # 2. INTERFAZ DE EDICIÓN CON BOTÓN DE GUARDAR
-
-    columnas_visibles_editor = ['Nombre', 'Apellido', 'Asignatura', ID_CURSO_NOTAS] + COLUMNAS_NOTAS + [
-        'Comentarios_Docente']
-
-    st.header('📝 Edición de Notas y Comentarios')
-    st.warning(
-        "🚨 **Edite directamente las notas y comentarios. Use el botón 'Guardar Cambios' para persistir la data en Drive.**")
-
-    with st.form("notas_form"):
-
-        # Creación dinámica de la configuración de columnas
-        column_config_dict = {
-            "Comentarios_Docente": st.column_config.TextColumn("Descripción/Comentario (Editable)"),
-            "Nombre": st.column_config.TextColumn("Nombre", disabled=True),
-            "Apellido": st.column_config.TextColumn("Apellido", disabled=True),
-            "Asignatura": st.column_config.TextColumn("Asignatura", disabled=True),
-            ID_CURSO_NOTAS: st.column_config.TextColumn("ID_CURSO", disabled=True),
-        }
-        for col in COLUMNAS_NOTAS:
-            column_config_dict[col] = st.column_config.NumberColumn(col, min_value=0.0, max_value=10.0, format="%.1f")
-
-        df_editado_with_info = st.data_editor(
-            df_filtrado_docente_base[columnas_visibles_editor],
-            column_config=column_config_dict,
-            hide_index=False,
-            use_container_width=True,
-            key="editor_notas"
-        )
-
-        save_button = st.form_submit_button("💾 Guardar Cambios en Google Sheets")
-
-        if save_button:
-            edited_data = st.session_state["editor_notas"]
-            save_data_to_gsheet(st.session_state['df_notas_base'], edited_data)
-
-    st.markdown('***')
-
-    # 3. RECALCULO DE PROMEDIOS CON LOS DATOS EDITADOS
-    df_notas_editadas = df_editado_with_info[['Nombre', 'Apellido'] + COLUMNAS_NOTAS].copy()
-
-    if COLUMNAS_NOTAS:
-        df_notas_editadas['Promedio_Materia'] = df_notas_editadas[COLUMNAS_NOTAS].mean(axis=1).round(2)
-        df_promedio_docente = df_notas_editadas.groupby(['Nombre', 'Apellido'])['Promedio_Materia'].mean().reset_index()
+        df_promedio_docente = df_para_promedio_general.groupby(['Nombre', 'Apellido'])[
+            'Promedio_Materia'].mean().reset_index()
         df_promedio_docente.rename(columns={'Promedio_Materia': 'Promedio General de sus Cursos'}, inplace=True)
         df_promedio_docente = df_promedio_docente.sort_values(by='Promedio General de sus Cursos',
                                                               ascending=False).round(2)
 
-        # 4. VISTA DE RESULTADOS ACTUALIZADOS
-        st.header('📈 Promedios Actualizados (Post-Edición)')
         st.dataframe(df_promedio_docente, use_container_width=True)
+    elif not COLUMNAS_NOTAS:
+        st.warning("No hay columnas de notas configuradas para calcular promedios.")
     else:
-        st.warning("No hay columnas de notas para calcular promedios.")
+        st.info("Aún no hay datos para calcular el promedio general.")
+
+    st.markdown('***')
 
 
 # --- EJECUCIÓN PRINCIPAL FINAL ---
