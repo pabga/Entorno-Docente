@@ -9,14 +9,10 @@ from gspread import utils
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
+CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'  # Nueva columna para la agrupación jerárquica
 
 DOCENTES_ASIGNADOS = {}
 COLUMNAS_NOTAS = []
-
-# --- LISTA MAESTRA DE PESTAÑAS (Fija) ---
-# Define los 5 cursos que siempre aparecerán como pestañas.
-# ASEGÚRATE DE QUE ESTOS IDs COINCIDAN CON LOS CÓDIGOS LIMPIOS (SIN ESPACIOS, EN MAYÚSCULAS)
-CURSOS_PESTANAS_MAESTRO = ['PPHA-IS-2025-P', 'PPHA-IS-2025-F', 'PPHA-ME-2025-P', 'PPHA-ME-2025-F', 'PPHA-NA-2025-P']
 
 
 # ----------------------------------------------------------------------
@@ -124,6 +120,19 @@ def integrar_y_calcular(df_alumnos, df_cursos, df_notas):
 
     df_final.drop(columns=[ID_CURSO_MAESTRO], inplace=True)
 
+    # --- PASO CRÍTICO: CREAR EL CURSO PRINCIPAL ---
+    # Asume que el Curso Principal son las letras antes del primer guion o número.
+    def get_curso_principal(curso_id):
+        if pd.isna(curso_id):
+            return "OTROS"
+        # Busca el primer grupo de letras seguidas antes de un número o guion
+        import re
+        match = re.match(r'^([A-Z0-9]+)', curso_id)
+        return match.group(1) if match else "OTROS"
+
+    df_final[CURSO_PRINCIPAL] = df_final[ID_CURSO_NOTAS].apply(get_curso_principal)
+    # ----------------------------------------------
+
     # 3. CÁLCULO DE PROMEDIOS
     if COLUMNAS_NOTAS:
         df_final['Promedio_Materia'] = df_final[COLUMNAS_NOTAS].mean(axis=1).round(2)
@@ -218,7 +227,6 @@ if 'df_final_completo' not in st.session_state:
 
     # --- CONVERSIÓN CRÍTICA DE DNI Y CURSOS A STRING Y LIMPIEZA ---
     try:
-        # Función para limpiar columnas de códigos (DNI, ID_CURSO). AGRESIVA.
         def clean_code_column(df, col_name):
             if col_name in df.columns:
                 df[col_name] = df[col_name].astype(str)
@@ -227,21 +235,17 @@ if 'df_final_completo' not in st.session_state:
             return df
 
 
-        # Limpieza de DNI en todas las hojas relevantes
         df_instructores_full = clean_code_column(df_instructores_full, 'DNI_DOCENTE')
         df_alumnos_full = clean_code_column(df_alumnos_full, 'DNI')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'DNI')
 
-        # Limpieza de IDs de Curso en todas las hojas relevantes
         df_instructores_full = clean_code_column(df_instructores_full, 'ID_CURSO')
         df_notas_brutas_full = clean_code_column(df_notas_brutas_full, 'ID_CURSO')
         df_cursos_full = clean_code_column(df_cursos_full, 'D_CURSO')
 
-        # UNIFICAR CÓDIGOS DE CURSO A MAYÚSCULAS (Final Step)
         df_instructores_full['ID_CURSO'] = df_instructores_full['ID_CURSO'].str.upper()
         df_notas_brutas_full['ID_CURSO'] = df_notas_brutas_full['ID_CURSO'].str.upper()
         df_cursos_full['D_CURSO'] = df_cursos_full['D_CURSO'].str.upper()
-
 
     except Exception as e:
         st.error(f"Error al intentar limpiar y convertir columnas DNI/Curso a texto: {e}")
@@ -250,7 +254,6 @@ if 'df_final_completo' not in st.session_state:
 
     # --- PROCESAMIENTO DINÁMICO: Crea los diccionarios de asignaciones y claves ---
     try:
-        # 1. Crear el mapa de asignaciones (DNI -> [Cursos])
         docentes_asignados_map = (
             df_instructores_full.groupby('DNI_DOCENTE')['ID_CURSO']
             .apply(list)
@@ -258,7 +261,6 @@ if 'df_final_completo' not in st.session_state:
         )
         st.session_state['docentes_asignados_map'] = docentes_asignados_map
 
-        # 2. Crear el mapa de claves (DNI -> Clave_Acceso)
         docentes_claves_map = (
             df_instructores_full.groupby('DNI_DOCENTE')['Clave_Acceso']
             .first()
@@ -317,12 +319,28 @@ def show_dashboard_filtrado(docente_dni):
     docentes_map = st.session_state.get('docentes_asignados_map', {})
     cursos_asignados_raw = docentes_map.get(docente_dni, [])
 
-    # Pre-limpieza de la lista de asignados antes de usarla en el filtro
+    # Pre-limpieza y unificación a MAYÚSCULAS de la lista de asignados
     cursos_asignados = [c.replace('.', '').replace(',', '').replace(' ', '').upper() for c in cursos_asignados_raw if
                         isinstance(c, str)]
 
     # 1. FILTRADO DEL DATAFRAME BASE COMPLETO
     df_final_completo = st.session_state['df_final_completo']
+
+    # --- CÁLCULO DE PESTAÑAS DINÁMICAS (Cursos Principales) ---
+    # Obtenemos todos los cursos principales únicos que el docente tiene asignados.
+    cursos_principales_asignados = df_final_completo[df_final_completo[ID_CURSO_NOTAS].isin(cursos_asignados)][
+        CURSO_PRINCIPAL].unique().tolist()
+
+    # Si el docente tiene asignaciones, pero no hay notas para ninguna de ellas, usamos los principales de su lista RAW
+    if not cursos_principales_asignados and cursos_asignados:
+        cursos_principales_asignados = [c.split('-')[0] for c in cursos_asignados]
+        cursos_principales_asignados = sorted(list(set(cursos_principales_asignados)))
+
+    if not cursos_principales_asignados:
+        st.warning(
+            "Usted está asignado, pero sus cursos no se encontraron en el sistema de notas o no tienen código de curso principal legible.")
+        return
+    # -------------------------------------------------------------
 
     # --- DEBUGGING Y RAW DATA ---
     codigos_encontrados_en_notas = df_final_completo[ID_CURSO_NOTAS].unique().tolist()
@@ -333,50 +351,54 @@ def show_dashboard_filtrado(docente_dni):
     st.sidebar.code(repr(cursos_asignados))
     st.sidebar.write("**2. Códigos en Hoja NOTAS (EXISTENCIA LIMPIA):**")
     st.sidebar.code(repr(codigos_encontrados_en_notas))
-    st.sidebar.write(f"DNI Logueado: `{docente_dni}`")
+    st.sidebar.write(f"Cursos Principales (PESTAÑAS): {cursos_principales_asignados}")
     st.sidebar.markdown('---')
     # --- FIN DEBUGGING ---
 
     st.title(f'👩‍🏫 Dashboard Docente - DNI: {docente_dni}')
-    st.info(f"Mostrando el estado de los {len(CURSOS_PESTANAS_MAESTRO)} cursos principales.")
+    st.info(
+        f"Mostrando datos agrupados por {len(cursos_principales_asignados)} Cursos Principales: {', '.join(cursos_principales_asignados)}")
     st.markdown('***')
 
     # -----------------------------------------------------------
-    # INICIO DE ESTRUCTURA DE PESTAÑAS FIJAS
+    # INICIO DE ESTRUCTURA DE PESTAÑAS DINÁMICAS
     # -----------------------------------------------------------
 
-    # Creamos un objeto de tabs, usando la lista MAESTRA de cursos
-    tabs = st.tabs(CURSOS_PESTANAS_MAESTRO)
+    # Creamos un objeto de tabs, usando la lista DINÁMICA de cursos principales
+    tabs = st.tabs(cursos_principales_asignados)
 
-    for i, curso_id in enumerate(CURSOS_PESTANAS_MAESTRO):
+    for i, curso_principal_id in enumerate(cursos_principales_asignados):
         with tabs[i]:
-            st.header(f"Notas de la Materia: {curso_id}")
+            st.header(f"Agrupación: {curso_principal_id}")
 
-            # --- VERIFICACIÓN DE ASIGNACIÓN ---
-            if curso_id not in cursos_asignados:
-                st.error(f"⛔️ Usted no tiene esta materia asignada ({curso_id}) según la hoja 'instructores'.")
-                continue
+            # --- 1. FILTRADO: SOLO EL CURSO PRINCIPAL ACTUAL ---
 
-            # --- 1. FILTRADO: SOLO EL CURSO ACTUAL (Y ASIGNADO) ---
-            df_filtrado_curso = df_final_completo[
-                df_final_completo[ID_CURSO_NOTAS] == curso_id
-                ].reset_index(drop=True).copy()
+            # Filtramos el DF completo por el Curso Principal
+            df_filtrado_principal = df_final_completo[
+                (df_final_completo[CURSO_PRINCIPAL] == curso_principal_id)
+            ].copy()
 
-            if df_filtrado_curso.empty:
-                st.warning(f"⚠️ ¡Curso Asignado! Pero no hay notas registradas en la hoja 'notas' para {curso_id}.")
+            # Filtramos *además* para asegurarnos que solo vemos las submaterias que el DOCENTE tiene ASIGNADAS
+            df_filtrado_docente = df_filtrado_principal[
+                df_filtrado_principal[ID_CURSO_NOTAS].isin(cursos_asignados)
+            ].reset_index(drop=True).copy()
+
+            if df_filtrado_docente.empty:
+                st.warning(
+                    f"⚠️ No hay notas registradas en la hoja 'notas' para las submaterias asignadas de {curso_principal_id}.")
                 continue
 
             # Preparamos las columnas
-            if 'Comentarios_Docente' not in df_filtrado_curso.columns:
-                df_filtrado_curso['Comentarios_Docente'] = ''
+            if 'Comentarios_Docente' not in df_filtrado_docente.columns:
+                df_filtrado_docente['Comentarios_Docente'] = ''
 
             # 2. INTERFAZ DE EDICIÓN
             columnas_visibles_editor = ['Nombre', 'Apellido', 'Asignatura', ID_CURSO_NOTAS] + COLUMNAS_NOTAS + [
                 'Comentarios_Docente']
 
-            st.subheader('📝 Edición de Notas')
+            st.subheader('📝 Edición de Notas (Submaterias Asignadas)')
 
-            with st.form(f"notas_form_{curso_id}"):
+            with st.form(f"notas_form_{curso_principal_id}"):
 
                 # Creación dinámica de la configuración de columnas
                 column_config_dict = {
@@ -391,17 +413,17 @@ def show_dashboard_filtrado(docente_dni):
                                                                             format="%.1f")
 
                 df_editado_with_info = st.data_editor(
-                    df_filtrado_curso[columnas_visibles_editor],
+                    df_filtrado_docente[columnas_visibles_editor],
                     column_config=column_config_dict,
                     hide_index=False,
                     use_container_width=True,
-                    key=f"editor_notas_{curso_id}"
+                    key=f"editor_notas_{curso_principal_id}"
                 )
 
-                save_button = st.form_submit_button(f"💾 Guardar Cambios para {curso_id}")
+                save_button = st.form_submit_button(f"💾 Guardar Cambios para {curso_principal_id}")
 
                 if save_button:
-                    edited_data = st.session_state[f"editor_notas_{curso_id}"]
+                    edited_data = st.session_state[f"editor_notas_{curso_principal_id}"]
                     save_data_to_gsheet(st.session_state['df_notas_base'], edited_data)
 
             st.markdown('***')
