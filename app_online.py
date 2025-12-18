@@ -5,7 +5,7 @@ import numpy as np
 import re
 from gspread import utils
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN DE IDENTIFICADORES ---
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
@@ -13,7 +13,9 @@ CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'
 DNI_ADMIN = "41209872"
 
 
+# --- FUNCIÓN PARA RECONSTRUIR CREDENCIALES ---
 def get_gcp_credentials():
+    """Reconstruye el diccionario de credenciales desde Streamlit Secrets."""
     return {
         "type": st.secrets["gcp_service_account_type"],
         "project_id": st.secrets["gcp_service_account_project_id"],
@@ -28,6 +30,10 @@ def get_gcp_credentials():
         "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
     }
 
+
+# ----------------------------------------------------------------------
+#                         CONEXIÓN Y CARGA DE DATOS
+# ----------------------------------------------------------------------
 
 @st.cache_data(ttl=300)
 def load_data_online():
@@ -45,7 +51,9 @@ def load_data_online():
         if not raw_notas: return df_al, df_cu, pd.DataFrame(), pd.DataFrame()
 
         df_no = pd.DataFrame(raw_notas)
+        # Normalización de encabezados
         df_no.columns = [str(c).strip().upper() for c in df_no.columns]
+        # Inyectar índice de fila real de Excel
         df_no['ROW_INDEX'] = [i + 2 for i in range(len(raw_notas))]
 
         all_cols = [c for c in df_no.columns.tolist() if c != 'ROW_INDEX']
@@ -69,6 +77,10 @@ def load_data_online():
         return None, None, None, None
 
 
+# ----------------------------------------------------------------------
+#                         ACCIONES DE ADMIN
+# ----------------------------------------------------------------------
+
 def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
     try:
         creds = get_gcp_credentials()
@@ -87,17 +99,24 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
         for c in cursos_id:
             for a in alumnos_dni:
                 if (a, c) not in existentes:
+                    # Estructura: DNI, ID_CURSO, 0 (notas...), "" (comentarios)
                     fila = [a, c] + [0] * len(st.session_state.get('notas_header_list', [])) + [""]
                     nuevas_filas.append(fila)
 
         if nuevas_filas:
             ws_notas.append_rows(nuevas_filas)
-            st.success(f"✅ Se agregaron {len(nuevas_filas)} filas.")
+            st.success(f"✅ Se agregaron {len(nuevas_filas)} combinaciones alumno-materia.")
             st.cache_data.clear()
             st.rerun()
+        else:
+            st.info("La base de datos ya está sincronizada.")
     except Exception as e:
         st.error(f"Error sincronizando: {e}")
 
+
+# ----------------------------------------------------------------------
+#                         GUARDADO Y LÓGICA
+# ----------------------------------------------------------------------
 
 def guardar_cambios(edited_df):
     if not isinstance(edited_df, pd.DataFrame) or edited_df.empty: return
@@ -118,7 +137,7 @@ def guardar_cambios(edited_df):
             for col in columns_to_save:
                 if col in fila:
                     val = fila[col]
-                    # Conversión de int64 a nativo de Python para evitar error JSON
+                    # CORRECCIÓN DE ERROR int64: Convertir a nativo de Python
                     if hasattr(val, "item"): val = val.item()
                     if pd.isna(val): val = ""
 
@@ -127,7 +146,7 @@ def guardar_cambios(edited_df):
 
         if batch:
             ws.batch_update(batch)
-            st.success("✅ Guardado correctamente.")
+            st.success("✅ Datos guardados correctamente.")
             st.cache_data.clear()
             st.rerun()
     except Exception as e:
@@ -136,6 +155,7 @@ def guardar_cambios(edited_df):
 
 def procesar_datos(df_al, df_cu, df_no):
     if df_al is None or df_no is None or df_no.empty: return pd.DataFrame()
+    # Normalizar para el cruce
     df_al.columns = [str(c).strip().upper() for c in df_al.columns]
     df_cu.columns = [str(c).strip().upper() for c in df_cu.columns]
 
@@ -155,17 +175,21 @@ def procesar_datos(df_al, df_cu, df_no):
     return df
 
 
-# --- INTERFAZ ---
-st.set_page_config(page_title="Sistema de Notas Pro", layout="wide")
+# ----------------------------------------------------------------------
+#                         INTERFAZ
+# ----------------------------------------------------------------------
+
+st.set_page_config(page_title="Sistema de Gestión de Notas", layout="wide")
+
 df_al, df_cu, df_no, df_in = load_data_online()
 df_final = procesar_datos(df_al, df_cu, df_no)
 
 if 'logeado' not in st.session_state: st.session_state.logeado = False
 
 if not st.session_state.logeado:
-    st.title("🔐 Acceso")
+    st.title("🔐 Acceso Docente")
     dni_in = st.text_input("DNI")
-    pass_in = st.text_input("Clave", type="password")
+    pass_in = st.text_input("Contraseña", type="password")
     if st.button("Entrar"):
         df_in.columns = [str(c).strip().upper() for c in df_in.columns]
         verif = df_in[(df_in['DNI_DOCENTE'].astype(str) == dni_in) & (df_in['CLAVE_ACCESO'].astype(str) == pass_in)]
@@ -175,17 +199,17 @@ if not st.session_state.logeado:
             st.session_state.cursos = [str(c).upper().strip() for c in verif['ID_CURSO'].tolist()]
             st.rerun()
         else:
-            st.error("Error.")
+            st.error("DNI o Clave incorrectos.")
 else:
     with st.sidebar:
         st.title(f"DNI: {st.session_state.dni}")
         if str(st.session_state.dni) == DNI_ADMIN:
             st.markdown("---")
-            st.subheader("🛠 Admin")
-            if st.button("🔄 Sincronizar Todo"):
+            st.subheader("🛠 Panel de Administrador")
+            if st.button("🔄 Sincronizar Alumnos/Materias"):
                 sincronizar_matriz_notas(df_al, df_cu, df_no)
         st.markdown("---")
-        if st.button("Cerrar Sesión"):
+        if st.sidebar.button("Cerrar Sesión"):
             st.session_state.logeado = False
             st.rerun()
 
@@ -199,14 +223,20 @@ else:
         for i, g in enumerate(grupos):
             with tabs[i]:
                 df_tab = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
+                # Ocultamos ROW_INDEX pero lo mantenemos para el guardado
                 col_coment = [c for c in df_tab.columns if "COMENTARIOS" in c][0]
                 cols_edit = ['ROW_INDEX', 'NOMBRE', 'APELLIDO', 'ID_CURSO'] + cols_n + [col_coment]
 
-                config = {c: st.column_config.Column(disabled=True) for c in
-                          ['ROW_INDEX', 'NOMBRE', 'APELLIDO', 'ID_CURSO']}
+                config = {
+                    'ROW_INDEX': st.column_config.Column(disabled=True, width="small"),
+                    'NOMBRE': st.column_config.Column(disabled=True),
+                    'APELLIDO': st.column_config.Column(disabled=True),
+                    'ID_CURSO': st.column_config.Column(disabled=True)
+                }
+
                 edited_df = st.data_editor(df_tab[cols_edit], column_config=config, key=f"ed_{g}",
                                            use_container_width=True, hide_index=True)
-                if st.button(f"Guardar {g}", key=f"btn_{g}"):
+                if st.button(f"Guardar Cambios en {g}", key=f"btn_{g}"):
                     guardar_cambios(edited_df)
     else:
-        st.warning("Sin datos para este docente.")
+        st.warning("No tienes materias asignadas o los alumnos no han sido sincronizados.")
