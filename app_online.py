@@ -5,7 +5,7 @@ import numpy as np
 import re
 from gspread import utils
 
-# --- CONFIGURACIÓN DE IDENTIFICADORES ---
+# --- CONFIGURACIÓN ---
 ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
@@ -36,33 +36,23 @@ def load_data_online():
         gc = gspread.service_account_from_dict(creds)
         sh = gc.open_by_url(st.secrets["cursos_sheet_url"])
 
-        # Carga de hojas
         df_al = pd.DataFrame(sh.worksheet("alumnos").get_all_records())
         df_cu = pd.DataFrame(sh.worksheet("cursos").get_all_records())
 
         ws_notas = sh.worksheet("notas")
         raw_notas = ws_notas.get_all_records()
 
-        if not raw_notas:
-            st.error("La hoja de 'notas' está vacía o no tiene encabezados.")
-            return df_al, df_cu, pd.DataFrame(), pd.DataFrame()
+        if not raw_notas: return df_al, df_cu, pd.DataFrame(), pd.DataFrame()
 
         df_no = pd.DataFrame(raw_notas)
-
-        # --- LIMPIEZA AGRESIVA DE ENCABEZADOS ---
-        # Convertimos todos los nombres de columnas a mayúsculas y quitamos espacios
         df_no.columns = [str(c).strip().upper() for c in df_no.columns]
-
-        # Guardamos el índice real de fila
         df_no['ROW_INDEX'] = [i + 2 for i in range(len(raw_notas))]
 
         all_cols = [c for c in df_no.columns.tolist() if c != 'ROW_INDEX']
 
-        # Identificar columnas de notas (entre ID_CURSO y COMENTARIOS)
         try:
-            # Buscamos los índices de forma flexible
             idx_inicio = next(i for i, c in enumerate(all_cols) if "ID_CURSO" in c) + 1
-            idx_fin = next(i for i, c in enumerate(all_cols) if "COMENTARIOS" in i or "COMENTARIOS" in c)
+            idx_fin = next(i for i, c in enumerate(all_cols) if "COMENTARIOS" in c)
             notas_cols = all_cols[idx_inicio:idx_fin]
         except:
             notas_cols = all_cols[2:-1] if len(all_cols) > 3 else []
@@ -85,7 +75,6 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
         gc = gspread.service_account_from_dict(creds)
         ws_notas = gc.open_by_url(st.secrets["cursos_sheet_url"]).worksheet("notas")
 
-        # Normalizar para comparar
         alumnos_dni = [str(d).strip() for d in df_alumnos['DNI'].unique()]
         cursos_id = [str(c).strip().upper() for c in df_cursos['D_CURSO'].unique()]
 
@@ -98,22 +87,20 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
         for c in cursos_id:
             for a in alumnos_dni:
                 if (a, c) not in existentes:
-                    # Fila: DNI, ID_CURSO, 0...0, Comentario Vacío
                     fila = [a, c] + [0] * len(st.session_state.get('notas_header_list', [])) + [""]
                     nuevas_filas.append(fila)
 
         if nuevas_filas:
             ws_notas.append_rows(nuevas_filas)
-            st.success(f"✅ Se agregaron {len(nuevas_filas)} filas nuevas.")
+            st.success(f"✅ Se agregaron {len(nuevas_filas)} filas.")
             st.cache_data.clear()
             st.rerun()
-        else:
-            st.info("Todo está sincronizado.")
     except Exception as e:
         st.error(f"Error sincronizando: {e}")
 
 
 def guardar_cambios(edited_df):
+    if not isinstance(edited_df, pd.DataFrame) or edited_df.empty: return
     try:
         creds = get_gcp_credentials()
         gc = gspread.service_account_from_dict(creds)
@@ -121,14 +108,20 @@ def guardar_cambios(edited_df):
         headers = st.session_state['full_header_list']
 
         batch = []
+        col_coment = [c for c in edited_df.columns if "COMENTARIOS" in c][0]
+        columns_to_save = st.session_state['notas_header_list'] + [col_coment]
+
         for i in range(len(edited_df)):
             fila = edited_df.iloc[i]
             gs_row = int(fila['ROW_INDEX'])
 
-            # Guardamos notas y comentarios (usando los nombres normalizados)
-            for col in st.session_state['notas_header_list'] + [h for h in headers if "COMENTARIOS" in h]:
+            for col in columns_to_save:
                 if col in fila:
                     val = fila[col]
+                    # Conversión de int64 a nativo de Python para evitar error JSON
+                    if hasattr(val, "item"): val = val.item()
+                    if pd.isna(val): val = ""
+
                     col_gs = headers.index(col) + 1
                     batch.append({'range': utils.rowcol_to_a1(gs_row, col_gs), 'values': [[val]]})
 
@@ -143,16 +136,13 @@ def guardar_cambios(edited_df):
 
 def procesar_datos(df_al, df_cu, df_no):
     if df_al is None or df_no is None or df_no.empty: return pd.DataFrame()
-
-    # Normalizamos nombres de columnas para el cruce
     df_al.columns = [str(c).strip().upper() for c in df_al.columns]
     df_cu.columns = [str(c).strip().upper() for c in df_cu.columns]
 
-    # Cruce seguro
     df_no['DNI'] = df_no['DNI'].astype(str).str.strip()
     df_al['DNI'] = df_al['DNI'].astype(str).str.strip()
-    df_no['ID_CURSO'] = df_no['ID_CURSO'].astype(str).str.strip().str.upper()
-    df_cu['D_CURSO'] = df_cu['D_CURSO'].astype(str).str.strip().str.upper()
+    df_no['ID_CURSO'] = df_no['ID_CURSO'].astype(str).str.strip().upper()
+    df_cu['D_CURSO'] = df_cu['D_CURSO'].astype(str).str.strip().upper()
 
     df = pd.merge(df_no, df_al[['DNI', 'NOMBRE', 'APELLIDO']], on='DNI', how='left')
     df = pd.merge(df, df_cu[['D_CURSO', 'ASIGNATURA']], left_on='ID_CURSO', right_on='D_CURSO', how='left')
@@ -187,14 +177,17 @@ if not st.session_state.logeado:
         else:
             st.error("Error.")
 else:
-    if str(st.session_state.dni) == DNI_ADMIN:
-        with st.sidebar:
+    with st.sidebar:
+        st.title(f"DNI: {st.session_state.dni}")
+        if str(st.session_state.dni) == DNI_ADMIN:
+            st.markdown("---")
             st.subheader("🛠 Admin")
             if st.button("🔄 Sincronizar Todo"):
                 sincronizar_matriz_notas(df_al, df_cu, df_no)
-            if st.button("Cerrar Sesión"):
-                st.session_state.logeado = False
-                st.rerun()
+        st.markdown("---")
+        if st.button("Cerrar Sesión"):
+            st.session_state.logeado = False
+            st.rerun()
 
     mis_cursos = st.session_state.cursos
     df_mio = df_final[df_final['ID_CURSO'].isin(mis_cursos)]
@@ -206,7 +199,6 @@ else:
         for i, g in enumerate(grupos):
             with tabs[i]:
                 df_tab = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
-                # Buscamos nombre de columna de comentarios real
                 col_coment = [c for c in df_tab.columns if "COMENTARIOS" in c][0]
                 cols_edit = ['ROW_INDEX', 'NOMBRE', 'APELLIDO', 'ID_CURSO'] + cols_n + [col_coment]
 
@@ -217,4 +209,4 @@ else:
                 if st.button(f"Guardar {g}", key=f"btn_{g}"):
                     guardar_cambios(edited_df)
     else:
-        st.warning("Sin datos.")
+        st.warning("Sin datos para este docente.")
