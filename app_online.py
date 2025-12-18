@@ -10,7 +10,6 @@ ID_ALUMNO = 'DNI'
 ID_CURSO_NOTAS = 'ID_CURSO'
 ID_CURSO_MAESTRO = 'D_CURSO'
 CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'
-# --- DEFINE AQUÍ TU DNI DE ADMINISTRADOR ---
 DNI_ADMIN = "41209872"
 
 
@@ -42,15 +41,18 @@ def load_data_online():
         df_no = pd.DataFrame(sh.worksheet("notas").get_all_records())
         df_in = pd.DataFrame(sh.worksheet("instructores").get_all_records())
 
+        # Normalizar nombres de columnas (Quitar espacios invisibles)
+        df_no.columns = [c.strip() for c in df_no.columns]
+
         all_cols = df_no.columns.tolist()
 
-        # DETECCIÓN DINÁMICA: Notas entre ID_CURSO y Comentarios_Docente
+        # Identificar columnas de notas entre ID_CURSO y Comentarios_Docente
         try:
             idx_inicio = all_cols.index(ID_CURSO_NOTAS) + 1
-            idx_fin = all_cols.index('Comentarios_Docente')
+            # Buscamos Comentarios_Docente ignorando espacios
+            idx_fin = [i for i, x in enumerate(all_cols) if "Comentarios" in x][0]
             notas_cols = all_cols[idx_inicio:idx_fin]
         except:
-            # Si algo falla, asume que desde la 3ra columna hasta la penúltima son notas
             notas_cols = all_cols[2:-1] if len(all_cols) > 3 else []
 
         for c in notas_cols:
@@ -60,14 +62,13 @@ def load_data_online():
         st.session_state['full_header_list'] = all_cols
 
         return df_al, df_cu, df_no, df_in
-
     except Exception as e:
-        st.error(f"Error técnico al cargar: {e}")
+        st.error(f"Error en carga: {e}")
         return None, None, None, None
 
 
 # ----------------------------------------------------------------------
-#                         ACCIONES DE ADMIN (COLUMNAS)
+#                         ACCIONES DE ADMIN
 # ----------------------------------------------------------------------
 
 def add_col_admin(new_name):
@@ -79,11 +80,9 @@ def add_col_admin(new_name):
         ws = gc.open_by_url(st.secrets["cursos_sheet_url"]).worksheet("notas")
 
         headers = st.session_state['full_header_list']
-        # Insertar antes de Comentarios_Docente
-        try:
-            pos = headers.index('Comentarios_Docente') + 1
-        except:
-            pos = len(headers) + 1
+        # Buscar posición de comentarios para insertar antes
+        idx_fin = next((i for i, x in enumerate(headers) if "Comentarios" in x), len(headers))
+        pos = idx_fin + 1
 
         ws.insert_cols([[]], col=pos)
         ws.update_cell(1, pos, new_name)
@@ -92,19 +91,25 @@ def add_col_admin(new_name):
         st.cache_data.clear()
         st.rerun()
     except Exception as e:
-        st.error(f"Error al crear columna: {e}")
+        st.error(f"Error admin: {e}")
 
 
 # ----------------------------------------------------------------------
-#                         LÓGICA Y GUARDADO
+#                         LÓGICA DE DATOS
 # ----------------------------------------------------------------------
 
 def procesar_datos(df_al, df_cu, df_no):
     if df_al is None or df_no is None: return pd.DataFrame()
+
+    # Validar que existan las columnas clave
+    if ID_ALUMNO not in df_no.columns or ID_CURSO_NOTAS not in df_no.columns:
+        st.error(f"Faltan columnas clave en Excel. Verifica que existan {ID_ALUMNO} e {ID_CURSO_NOTAS}")
+        return pd.DataFrame()
+
     df_no[ID_ALUMNO] = df_no[ID_ALUMNO].astype(str).str.strip()
     df_al[ID_ALUMNO] = df_al[ID_ALUMNO].astype(str).str.strip()
-    df_no[ID_CURSO_NOTAS] = df_no[ID_CURSO_NOTAS].astype(str).str.strip().upper()
-    df_cu[ID_CURSO_MAESTRO] = df_cu[ID_CURSO_MAESTRO].astype(str).str.strip().upper()
+    df_no[ID_CURSO_NOTAS] = df_no[ID_CURSO_NOTAS].astype(str).str.strip().str.upper()
+    df_cu[ID_CURSO_MAESTRO] = df_cu[ID_CURSO_MAESTRO].astype(str).str.strip().str.upper()
 
     df = pd.merge(df_no, df_al[[ID_ALUMNO, 'Nombre', 'Apellido']], on=ID_ALUMNO, how='left')
     df = pd.merge(df, df_cu[[ID_CURSO_MAESTRO, 'Asignatura']], left_on=ID_CURSO_NOTAS, right_on=ID_CURSO_MAESTRO,
@@ -119,7 +124,7 @@ def procesar_datos(df_al, df_cu, df_no):
 
 
 def guardar_cambios(edit_dict):
-    if not edit_dict['edited_rows']: return
+    if not edit_dict or not edit_dict.get('edited_rows'): return
     try:
         gcp_dict = {k: st.secrets[k] for k in
                     ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri",
@@ -131,11 +136,12 @@ def guardar_cambios(edit_dict):
         for row_idx, cambios in edit_dict['edited_rows'].items():
             fila_gs = int(row_idx) + 2
             for col_nombre, nuevo_valor in cambios.items():
-                col_gs = headers.index(col_nombre) + 1
-                batch.append({'range': utils.rowcol_to_a1(fila_gs, col_gs), 'values': [[nuevo_valor]]})
+                if col_nombre in headers:
+                    col_gs = headers.index(col_nombre) + 1
+                    batch.append({'range': utils.rowcol_to_a1(fila_gs, col_gs), 'values': [[nuevo_valor]]})
         if batch:
             ws.batch_update(batch)
-            st.success("✅ Cambios guardados.")
+            st.success("✅ Datos guardados.")
             st.cache_data.clear()
             st.rerun()
     except Exception as e:
@@ -146,7 +152,7 @@ def guardar_cambios(edit_dict):
 #                         INTERFAZ
 # ----------------------------------------------------------------------
 
-st.set_page_config(page_title="Gestión de Notas", layout="wide")
+st.set_page_config(page_title="Dashboard Docente", layout="wide")
 
 df_al, df_cu, df_no, df_in = load_data_online()
 df_final = procesar_datos(df_al, df_cu, df_no)
@@ -154,9 +160,9 @@ df_final = procesar_datos(df_al, df_cu, df_no)
 if 'logeado' not in st.session_state: st.session_state.logeado = False
 
 if not st.session_state.logeado:
-    st.title("🔐 Acceso al Sistema")
-    dni_in = st.text_input("DNI Docente")
-    pass_in = st.text_input("Clave", type="password")
+    st.title("🔒 Acceso Docente")
+    dni_in = st.text_input("DNI")
+    pass_in = st.text_input("Contraseña", type="password")
     if st.button("Entrar"):
         verif = df_in[(df_in['DNI_DOCENTE'].astype(str) == dni_in) & (df_in['Clave_Acceso'].astype(str) == pass_in)]
         if not verif.empty:
@@ -165,39 +171,41 @@ if not st.session_state.logeado:
             st.session_state.cursos = verif['ID_CURSO'].tolist()
             st.rerun()
         else:
-            st.error("Datos incorrectos.")
+            st.error("Credenciales incorrectas.")
 else:
-    # Sidebar: Salir y Herramientas Admin
-    st.sidebar.title(f"Usuario: {st.session_state.dni}")
+    st.sidebar.title(f"DNI: {st.session_state.dni}")
     if st.sidebar.button("Cerrar Sesión"):
         st.session_state.logeado = False
         st.rerun()
 
-    # SOLO SI ES ADMIN APARECE EL BOTÓN DE AGREGAR EXAMEN
-    if st.session_state.dni == DNI_ADMIN:
+    if str(st.session_state.dni) == DNI_ADMIN:
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🛠 Panel de Administrador")
-        nuevo_ex = st.sidebar.text_input("Nombre de nueva evaluación")
-        if st.sidebar.button("Añadir Columna"):
+        st.sidebar.subheader("🛠 Admin: Añadir Examen")
+        nuevo_ex = st.sidebar.text_input("Nombre de columna")
+        if st.sidebar.button("Agregar"):
             if nuevo_ex: add_col_admin(nuevo_ex)
 
-    # Dashboard de Tabs
     mis_cursos = [str(c).strip().upper() for c in st.session_state.cursos]
     df_mio = df_final[df_final[ID_CURSO_NOTAS].isin(mis_cursos)]
     grupos = df_mio[CURSO_PRINCIPAL].unique()
 
     if len(grupos) > 0:
         tabs = st.tabs(list(grupos))
-        cols_n = st.session_state['notas_header_list']
+        cols_n = st.session_state.get('notas_header_list', [])
         for i, g in enumerate(grupos):
             with tabs[i]:
                 df_tab = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
-                st.subheader(f"Materia: {g}")
-                ver = ['Nombre', 'Apellido', ID_CURSO_NOTAS] + cols_n + ['Comentarios_Docente']
+                st.subheader(f"Materia Principal: {g}")
+
+                # Columnas finales: Nos aseguramos que existan en el DF
+                cols_finales = [c for c in ['Nombre', 'Apellido', ID_CURSO_NOTAS] + cols_n + ['Comentarios_Docente'] if
+                                c in df_tab.columns]
+
                 bloqueo = {c: st.column_config.Column(disabled=True) for c in ['Nombre', 'Apellido', ID_CURSO_NOTAS]}
 
-                edicion = st.data_editor(df_tab[ver], column_config=bloqueo, key=f"ed_{g}", use_container_width=True)
-                if st.button(f"Guardar {g}", key=f"btn_{g}"):
-                    guardar_changes(st.session_state[f"ed_{g}"])
+                edicion = st.data_editor(df_tab[cols_finales], column_config=bloqueo, key=f"ed_{g}",
+                                         use_container_width=True)
+                if st.button(f"Guardar Cambios {g}", key=f"btn_{g}"):
+                    guardar_cambios(st.session_state[f"ed_{g}"])
     else:
-        st.warning("Sin cursos asignados.")
+        st.warning("No tienes materias asignadas con alumnos registrados.")
