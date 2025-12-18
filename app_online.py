@@ -13,6 +13,24 @@ CURSO_PRINCIPAL = 'CURSO_PRINCIPAL'
 DNI_ADMIN = "41209872"
 
 
+# --- FUNCIÓN PARA RECONSTRUIR CREDENCIALES ---
+def get_gcp_credentials():
+    """Reconstruye el diccionario de credenciales desde Streamlit Secrets."""
+    return {
+        "type": st.secrets["gcp_service_account_type"],
+        "project_id": st.secrets["gcp_service_account_project_id"],
+        "private_key_id": st.secrets["gcp_service_account_private_key_id"],
+        "private_key": st.secrets["gcp_service_account_private_key"],
+        "client_email": st.secrets["gcp_service_account_client_email"],
+        "client_id": st.secrets["gcp_service_account_client_id"],
+        "auth_uri": st.secrets["gcp_service_account_auth_uri"],
+        "token_uri": st.secrets["gcp_service_account_token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"],
+        "universe_domain": st.secrets.get("gcp_service_account_universe_domain", "googleapis.com")
+    }
+
+
 # ----------------------------------------------------------------------
 #                         CONEXIÓN Y CARGA DE DATOS
 # ----------------------------------------------------------------------
@@ -20,20 +38,8 @@ DNI_ADMIN = "41209872"
 @st.cache_data(ttl=300)
 def load_data_online():
     try:
-        gcp_dict = {
-            "type": st.secrets["gcp_service_account_type"],
-            "project_id": st.secrets["gcp_service_account_project_id"],
-            "private_key_id": st.secrets["gcp_service_account_private_key_id"],
-            "private_key": st.secrets["gcp_service_account_private_key"],
-            "client_email": st.secrets["gcp_service_account_client_email"],
-            "client_id": st.secrets["gcp_service_account_client_id"],
-            "auth_uri": st.secrets["gcp_service_account_auth_uri"],
-            "token_uri": st.secrets["gcp_service_account_token_uri"],
-            "auth_provider_x509_cert_url": st.secrets["gcp_service_account_auth_provider_x509_cert_url"],
-            "client_x509_cert_url": st.secrets["gcp_service_account_client_x509_cert_url"]
-        }
-
-        gc = gspread.service_account_from_dict(gcp_dict)
+        creds = get_gcp_credentials()
+        gc = gspread.service_account_from_dict(creds)
         sh = gc.open_by_url(st.secrets["cursos_sheet_url"])
 
         df_al = pd.DataFrame(sh.worksheet("alumnos").get_all_records())
@@ -41,16 +47,14 @@ def load_data_online():
         df_no = pd.DataFrame(sh.worksheet("notas").get_all_records())
         df_in = pd.DataFrame(sh.worksheet("instructores").get_all_records())
 
-        # Normalizar nombres de columnas (Quitar espacios invisibles)
+        # Limpiar espacios en nombres de columnas
         df_no.columns = [c.strip() for c in df_no.columns]
-
         all_cols = df_no.columns.tolist()
 
-        # Identificar columnas de notas entre ID_CURSO y Comentarios_Docente
+        # Identificar columnas de notas dinámicamente
         try:
             idx_inicio = all_cols.index(ID_CURSO_NOTAS) + 1
-            # Buscamos Comentarios_Docente ignorando espacios
-            idx_fin = [i for i, x in enumerate(all_cols) if "Comentarios" in x][0]
+            idx_fin = next(i for i, x in enumerate(all_cols) if "Comentarios" in x)
             notas_cols = all_cols[idx_inicio:idx_fin]
         except:
             notas_cols = all_cols[2:-1] if len(all_cols) > 3 else []
@@ -73,14 +77,11 @@ def load_data_online():
 
 def add_col_admin(new_name):
     try:
-        gcp_dict = {k: st.secrets[k] for k in
-                    ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri",
-                     "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url"]}
-        gc = gspread.service_account_from_dict(gcp_dict)
+        creds = get_gcp_credentials()
+        gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(st.secrets["cursos_sheet_url"]).worksheet("notas")
 
         headers = st.session_state['full_header_list']
-        # Buscar posición de comentarios para insertar antes
         idx_fin = next((i for i, x in enumerate(headers) if "Comentarios" in x), len(headers))
         pos = idx_fin + 1
 
@@ -101,9 +102,8 @@ def add_col_admin(new_name):
 def procesar_datos(df_al, df_cu, df_no):
     if df_al is None or df_no is None: return pd.DataFrame()
 
-    # Validar que existan las columnas clave
     if ID_ALUMNO not in df_no.columns or ID_CURSO_NOTAS not in df_no.columns:
-        st.error(f"Faltan columnas clave en Excel. Verifica que existan {ID_ALUMNO} e {ID_CURSO_NOTAS}")
+        st.error(f"Faltan columnas clave: {ID_ALUMNO} o {ID_CURSO_NOTAS}")
         return pd.DataFrame()
 
     df_no[ID_ALUMNO] = df_no[ID_ALUMNO].astype(str).str.strip()
@@ -126,12 +126,11 @@ def procesar_datos(df_al, df_cu, df_no):
 def guardar_cambios(edit_dict):
     if not edit_dict or not edit_dict.get('edited_rows'): return
     try:
-        gcp_dict = {k: st.secrets[k] for k in
-                    ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri",
-                     "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url"]}
-        gc = gspread.service_account_from_dict(gcp_dict)
+        creds = get_gcp_credentials()
+        gc = gspread.service_account_from_dict(creds)
         ws = gc.open_by_url(st.secrets["cursos_sheet_url"]).worksheet("notas")
         headers = st.session_state['full_header_list']
+
         batch = []
         for row_idx, cambios in edit_dict['edited_rows'].items():
             fila_gs = int(row_idx) + 2
@@ -171,7 +170,7 @@ if not st.session_state.logeado:
             st.session_state.cursos = verif['ID_CURSO'].tolist()
             st.rerun()
         else:
-            st.error("Credenciales incorrectas.")
+            st.error("DNI o Contraseña incorrectos.")
 else:
     st.sidebar.title(f"DNI: {st.session_state.dni}")
     if st.sidebar.button("Cerrar Sesión"):
@@ -180,14 +179,15 @@ else:
 
     if str(st.session_state.dni) == DNI_ADMIN:
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🛠 Admin: Añadir Examen")
-        nuevo_ex = st.sidebar.text_input("Nombre de columna")
-        if st.sidebar.button("Agregar"):
+        st.sidebar.subheader("🛠 Panel Admin")
+        nuevo_ex = st.sidebar.text_input("Nueva columna")
+        if st.sidebar.button("Agregar Columna"):
             if nuevo_ex: add_col_admin(nuevo_ex)
 
+    # Tabs
     mis_cursos = [str(c).strip().upper() for c in st.session_state.cursos]
     df_mio = df_final[df_final[ID_CURSO_NOTAS].isin(mis_cursos)]
-    grupos = df_mio[CURSO_PRINCIPAL].unique()
+    grupos = sorted(df_mio[CURSO_PRINCIPAL].unique())
 
     if len(grupos) > 0:
         tabs = st.tabs(list(grupos))
@@ -195,17 +195,17 @@ else:
         for i, g in enumerate(grupos):
             with tabs[i]:
                 df_tab = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
-                st.subheader(f"Materia Principal: {g}")
+                st.subheader(f"Gestión de Notas: {g}")
 
-                # Columnas finales: Nos aseguramos que existan en el DF
-                cols_finales = [c for c in ['Nombre', 'Apellido', ID_CURSO_NOTAS] + cols_n + ['Comentarios_Docente'] if
-                                c in df_tab.columns]
+                # Columnas a mostrar
+                cols_edit = [c for c in ['Nombre', 'Apellido', ID_CURSO_NOTAS] + cols_n + ['Comentarios_Docente'] if
+                             c in df_tab.columns]
 
                 bloqueo = {c: st.column_config.Column(disabled=True) for c in ['Nombre', 'Apellido', ID_CURSO_NOTAS]}
 
-                edicion = st.data_editor(df_tab[cols_finales], column_config=bloqueo, key=f"ed_{g}",
+                edicion = st.data_editor(df_tab[cols_edit], column_config=bloqueo, key=f"ed_{g}",
                                          use_container_width=True)
                 if st.button(f"Guardar Cambios {g}", key=f"btn_{g}"):
                     guardar_cambios(st.session_state[f"ed_{g}"])
     else:
-        st.warning("No tienes materias asignadas con alumnos registrados.")
+        st.warning("No tienes materias asignadas.")
