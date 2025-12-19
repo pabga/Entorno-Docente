@@ -33,40 +33,52 @@ def load_data_online():
         gc = gspread.service_account_from_dict(creds)
         sh = gc.open_by_url(st.secrets["cursos_sheet_url"])
 
-        # Función para cargar y limpiar encabezados de forma forzada
-        def get_cleaned_df(sheet_name):
+        # Función robusta para cargar DataFrames
+        def get_clean_df(sheet_name):
             ws = sh.worksheet(sheet_name)
             data = ws.get_all_records()
-            if not data:
-                return pd.DataFrame()
+            if not data: return pd.DataFrame()
             df = pd.DataFrame(data)
+            # Limpiar encabezados: Mayúsculas y sin espacios
             df.columns = [str(c).strip().upper() for c in df.columns]
             return df
 
-        df_al = get_cleaned_df("alumnos")
-        df_cu = get_cleaned_df("cursos")
-        df_in = get_cleaned_df("instructores")
+        df_al = get_clean_df("alumnos")
+        df_cu = get_clean_df("cursos")
+        df_in = get_clean_df("instructores")
 
-        # Carga especial para notas (necesitamos ROW_INDEX para no pisar datos)
+        # Carga Manual de Notas para control total
         ws_notas = sh.worksheet("notas")
-        raw_notas = ws_notas.get_all_records()
+        raw_notas = ws_notas.get_all_values()  # Obtenemos todo como lista de listas
 
-        if not raw_notas:
-            st.error("⚠️ La hoja 'notas' está vacía. Use el botón de Admin para sincronizar.")
+        if not raw_notas or len(raw_notas) < 2:
+            # Si está vacía o solo tiene encabezado
             return df_al, df_cu, pd.DataFrame(), df_in
 
-        df_no = pd.DataFrame(raw_notas)
-        df_no.columns = [str(c).strip().upper() for c in df_no.columns]
-        df_no['ROW_INDEX'] = [i + 2 for i in range(len(raw_notas))]
+        # Asumimos que la primera fila es el encabezado
+        headers = [str(h).strip().upper() for h in raw_notas[0]]
+        data_rows = raw_notas[1:]
 
-        # Validar columnas críticas
+        df_no = pd.DataFrame(data_rows, columns=headers)
+
+        # --- DIAGNÓSTICO EN PANTALLA ---
+        # Si no encuentra ID_CURSO, intentamos renombrar la columna B
         if 'ID_CURSO' not in df_no.columns:
-            st.error(f"❌ No se encontró 'ID_CURSO' en 'notas'. Columnas: {df_no.columns.tolist()}")
-            return df_al, df_cu, pd.DataFrame(), df_in
+            if len(df_no.columns) >= 2:
+                # Renombramos la segunda columna a la fuerza
+                cols = df_no.columns.tolist()
+                cols[1] = 'ID_CURSO'
+                cols[0] = 'DNI'  # Y la primera a DNI por si acaso
+                df_no.columns = cols
+            else:
+                st.error(f"⚠️ Estructura irreconocible en 'notas'. Columnas vistas: {df_no.columns.tolist()}")
+                return df_al, df_cu, pd.DataFrame(), df_in
 
-        all_cols = [c for c in df_no.columns.tolist() if c != 'ROW_INDEX']
+        # Añadir índice de fila para guardar cambios (Row 1 is header, data starts at 2)
+        df_no['ROW_INDEX'] = [i + 2 for i in range(len(data_rows))]
 
-        # Detectar columnas de notas (entre ID_CURSO y COMENTARIOS)
+        # Detectar columnas de notas dinámicamente
+        all_cols = [c for c in df_no.columns if c != 'ROW_INDEX']
         try:
             idx_start = all_cols.index('ID_CURSO') + 1
             idx_end = next(i for i, c in enumerate(all_cols) if "COMENTARIO" in c)
@@ -74,15 +86,13 @@ def load_data_online():
         except:
             notas_cols = all_cols[2:-1] if len(all_cols) > 3 else []
 
-        for c in notas_cols:
-            df_no[c] = pd.to_numeric(df_no[c], errors='coerce').fillna(0)
-
         st.session_state['notas_header_list'] = notas_cols
-        st.session_state['full_header_list'] = all_cols
+        st.session_state['full_header_list'] = df_no.columns.tolist()
 
         return df_al, df_cu, df_no, df_in
+
     except Exception as e:
-        st.error(f"❌ Error en carga: {e}")
+        st.error(f"❌ Error crítico en carga: {e}")
         return None, None, None, None
 
 
@@ -92,34 +102,40 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
         gc = gspread.service_account_from_dict(creds)
         ws_notas = gc.open_by_url(st.secrets["cursos_sheet_url"]).worksheet("notas")
 
-        # Normalizar datos para comparar
-        alumnos_dni = [str(d).strip() for d in df_alumnos['DNI'].unique()]
-        cursos_id = [str(c).strip().upper() for c in df_cursos['D_CURSO'].unique()]
+        alumnos_dni = [str(d).strip() for d in df_alumnos['DNI'].unique() if str(d).strip()]
+        cursos_id = [str(c).strip().upper() for c in df_cursos['D_CURSO'].unique() if str(c).strip()]
 
         existentes = set()
-        if not df_notas_actuales.empty:
+        if not df_notas_actuales.empty and 'DNI' in df_notas_actuales.columns:
             existentes = set(zip(df_notas_actuales['DNI'].astype(str).str.strip(),
                                  df_notas_actuales['ID_CURSO'].astype(str).str.strip().upper()))
 
         nuevas_filas = []
+        # Preparamos filas vacías según columnas detectadas
+        num_cols = len(st.session_state.get('full_header_list', []))
+        if num_cols == 0: num_cols = 5  # Default safety
+
         for c in cursos_id:
             for a in alumnos_dni:
                 if (a, c) not in existentes:
-                    # [DNI, ID_CURSO, 0, 0... , ""]
-                    fila = [a, c] + [0] * len(st.session_state.get('notas_header_list', [])) + [""]
+                    # DNI, ID_CURSO, y resto vacíos/ceros
+                    # Asumimos DNI col 1, ID_CURSO col 2
+                    fila = [a, c] + [""] * (num_cols - 2)
                     nuevas_filas.append(fila)
 
         if nuevas_filas:
             ws_notas.append_rows(nuevas_filas)
-            st.success(f"✅ Sincronizado: {len(nuevas_filas)} filas nuevas creadas.")
+            st.success(f"✅ Sincronizadas {len(nuevas_filas)} filas.")
             st.cache_data.clear()
             st.rerun()
+        else:
+            st.info("Todo al día.")
     except Exception as e:
-        st.error(f"❌ Error sincronizando: {e}")
+        st.error(f"Error Sync: {e}")
 
 
 def guardar_cambios(edited_df):
-    if not isinstance(edited_df, pd.DataFrame) or edited_df.empty: return
+    if edited_df is None or edited_df.empty: return
     try:
         creds = get_gcp_credentials()
         gc = gspread.service_account_from_dict(creds)
@@ -127,114 +143,115 @@ def guardar_cambios(edited_df):
         headers = st.session_state['full_header_list']
 
         batch = []
-        col_coment = [c for c in edited_df.columns if "COMENTARIO" in c][0]
-        columns_to_save = st.session_state['notas_header_list'] + [col_coment]
+        # Detectar columna comentario
+        col_coment = next((c for c in edited_df.columns if "COMENTARIO" in c), None)
+        cols_notas = st.session_state.get('notas_header_list', [])
+        cols_save = cols_notas + ([col_coment] if col_coment else [])
 
         for i in range(len(edited_df)):
             fila = edited_df.iloc[i]
             gs_row = int(fila['ROW_INDEX'])
-            for col in columns_to_save:
-                if col in fila:
+
+            for col in cols_save:
+                if col in fila and col in headers:
                     val = fila[col]
-                    if hasattr(val, "item"): val = val.item()  # Convertir int64 a int nativo
-                    if pd.isna(val): val = ""
                     col_gs = headers.index(col) + 1
-                    batch.append({'range': utils.rowcol_to_a1(gs_row, col_gs), 'values': [[val]]})
+                    batch.append({'range': utils.rowcol_to_a1(gs_row, col_gs), 'values': [[str(val)]]})
 
         if batch:
             ws.batch_update(batch)
-            st.success("✅ Datos guardados.")
+            st.success("✅ Guardado.")
             st.cache_data.clear()
             st.rerun()
     except Exception as e:
-        st.error(f"❌ Error al guardar: {e}")
+        st.error(f"Error Guardar: {e}")
 
 
 def procesar_datos(df_al, df_cu, df_no):
-    if df_no is None or df_no.empty: return pd.DataFrame()
+    # --- DIAGNÓSTICO DE ERROR ---
+    if df_no is None or df_no.empty:
+        return pd.DataFrame()
 
-    # Cruce seguro (todo normalizado a mayúsculas)
+    # Aquí es donde fallaba antes. Ahora verificamos antes de acceder.
+    if 'ID_CURSO' not in df_no.columns:
+        st.error(
+            f"🚨 ERROR CRÍTICO: No encuentro la columna ID_CURSO. Las columnas que veo son: {df_no.columns.tolist()}")
+        st.stop()  # Detenemos la app para que leas el error
+
+    # Conversión segura
     df_no['DNI'] = df_no['DNI'].astype(str).str.strip()
-    df_al['DNI'] = df_al['DNI'].astype(str).str.strip()
     df_no['ID_CURSO'] = df_no['ID_CURSO'].astype(str).str.strip().upper()
-    df_cu['D_CURSO'] = df_cu['D_CURSO'].astype(str).str.strip().upper()
 
+    # Cruces
     df = pd.merge(df_no, df_al[['DNI', 'NOMBRE', 'APELLIDO']], on='DNI', how='left')
     df = pd.merge(df, df_cu[['D_CURSO', 'ASIGNATURA']], left_on='ID_CURSO', right_on='D_CURSO', how='left')
 
-    def extraer_principal(val):
-        res = re.match(r'^([A-Z0-9]+)', str(val))
-        return res.group(1) if res else "OTROS"
-
-    df[CURSO_PRINCIPAL] = df['ID_CURSO'].apply(extraer_principal)
+    df[CURSO_PRINCIPAL] = df['ID_CURSO'].apply(lambda x: x.split('-')[0] if '-' in x else x)
     return df
 
 
-# --- INTERFAZ ---
-st.set_page_config(page_title="Sistema de Notas Pro", layout="wide")
+# --- UI ---
+st.set_page_config(page_title="Sistema Notas", layout="wide")
 df_al, df_cu, df_no, df_in = load_data_online()
+df_final = procesar_datos(df_al, df_cu, df_no)
 
-if df_no is not None and not df_no.empty:
-    df_final = procesar_datos(df_al, df_cu, df_no)
-else:
-    df_final = pd.DataFrame()
+if 'auth' not in st.session_state: st.session_state.auth = False
 
-if 'logeado' not in st.session_state: st.session_state.logeado = False
-
-if not st.session_state.logeado:
-    st.title("🔐 Acceso Docente")
-    dni_in = st.text_input("DNI")
-    pass_in = st.text_input("Contraseña", type="password")
+if not st.session_state.auth:
+    st.title("Acceso")
+    u = st.text_input("DNI")
+    p = st.text_input("Clave", type="password")
     if st.button("Entrar"):
-        if df_in is not None and not df_in.empty:
-            verif = df_in[(df_in['DNI_DOCENTE'].astype(str) == dni_in) & (df_in['CLAVE_ACCESO'].astype(str) == pass_in)]
-            if not verif.empty:
-                st.session_state.logeado = True
-                st.session_state.dni = dni_in
-                st.session_state.cursos = [str(c).upper().strip() for c in verif['ID_CURSO'].tolist()]
-                st.rerun()
-            else:
-                st.error("DNI o Clave incorrectos.")
-else:
-    with st.sidebar:
-        st.write(f"Docente: {st.session_state.dni}")
-        if str(st.session_state.dni) == DNI_ADMIN:
-            st.markdown("---")
-            st.subheader("🛠 Panel de Administración")
-            if st.button("🔄 Sincronizar Alumnos"):
-                sincronizar_matriz_notas(df_al, df_cu, df_no)
-        if st.button("Cerrar Sesión"):
-            st.session_state.logeado = False
+        found = df_in[(df_in['DNI_DOCENTE'].astype(str) == u) & (df_in['CLAVE_ACCESO'].astype(str) == p)]
+        if not found.empty:
+            st.session_state.auth = True
+            st.session_state.dni = u
+            st.session_state.cursos = [str(x).upper().strip() for x in found['ID_CURSO'].tolist()]
             st.rerun()
+        else:
+            st.error("Datos incorrectos")
+else:
+    sb = st.sidebar
+    sb.title(f"Usuario: {st.session_state.dni}")
+
+    if str(st.session_state.dni) == DNI_ADMIN:
+        sb.info("Modo Admin")
+        if sb.button("Sincronizar Alumnos"):
+            sincronizar_matriz_notas(df_al, df_cu, df_no)
+
+    if sb.button("Salir"):
+        st.session_state.auth = False
+        st.rerun()
 
     if df_final.empty:
-        st.warning("⚠️ No hay datos de alumnos en la hoja de notas. Si es administrador, use 'Sincronizar'.")
+        st.warning("No hay datos de notas.")
     else:
         mis_cursos = st.session_state.cursos
         df_mio = df_final[df_final['ID_CURSO'].isin(mis_cursos)]
-        grupos = sorted(df_mio[CURSO_PRINCIPAL].unique())
+        grps = sorted(df_mio[CURSO_PRINCIPAL].unique())
 
-        if len(grupos) > 0:
-            tabs = st.tabs(list(grupos))
-            cols_n = st.session_state.get('notas_header_list', [])
-            for i, g in enumerate(grupos):
-                with tabs[i]:
-                    df_tab = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
-                    # Detectar columna de comentario de forma flexible
-                    col_coment = [c for c in df_tab.columns if "COMENTARIO" in c][0]
-                    cols_show = ['NOMBRE', 'APELLIDO', 'ID_CURSO'] + cols_n + [col_coment]
-                    cols_edit = ['ROW_INDEX'] + cols_show
-
-                    config = {
-                        "ROW_INDEX": st.column_config.Column(disabled=True, width="small"),
-                        "NOMBRE": st.column_config.Column(disabled=True),
-                        "APELLIDO": st.column_config.Column(disabled=True),
-                        "ID_CURSO": st.column_config.Column(disabled=True)
-                    }
-
-                    edited_df = st.data_editor(df_tab[cols_edit], column_config=config, key=f"ed_{g}",
-                                               use_container_width=True, hide_index=True)
-                    if st.button(f"Guardar Cambios {g}", key=f"btn_{g}"):
-                        guardar_cambios(edited_df)
+        if not grps:
+            st.warning("No tienes cursos asignados.")
         else:
-            st.warning("No tiene materias asignadas o no hay alumnos sincronizados en ellas.")
+            tabs = st.tabs(grps)
+            for i, g in enumerate(grps):
+                with tabs[i]:
+                    dft = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
+                    # Configuración Editor
+                    col_com = next((c for c in dft.columns if "COMENTARIO" in c), None)
+                    cols_n = st.session_state.get('notas_header_list', [])
+
+                    cols_view = ['NOMBRE', 'APELLIDO', 'ID_CURSO'] + cols_n + ([col_com] if col_com else [])
+                    cols_edit = ['ROW_INDEX'] + cols_view
+
+                    cnf = {k: st.column_config.Column(disabled=True) for k in
+                           ['ROW_INDEX', 'NOMBRE', 'APELLIDO', 'ID_CURSO']}
+
+                    # Convertir notas a float para edición numérica
+                    for cn in cols_n: dft[cn] = pd.to_numeric(dft[cn], errors='coerce').fillna(0)
+
+                    out = st.data_editor(dft[cols_edit], column_config=cnf, key=f"e_{g}", hide_index=True,
+                                         use_container_width=True)
+
+                    if st.button(f"Guardar {g}", key=f"b_{g}"):
+                        guardar_cambios(out)
