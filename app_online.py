@@ -39,7 +39,6 @@ def load_data_online():
                 ws = sh.worksheet(sheet_name)
                 vals = ws.get_all_values()
                 if not vals: return pd.DataFrame()
-                # Encabezados en mayúsculas y limpios
                 headers = [str(h).strip().upper() for h in vals[0]]
                 if len(vals) > 1:
                     return pd.DataFrame(vals[1:], columns=headers)
@@ -72,10 +71,11 @@ def load_data_online():
         df_no = pd.DataFrame(data, columns=headers)
         df_no['ROW_INDEX'] = [i + 2 for i in range(len(data))]
 
-        # Detectar columnas de notas para configuración
+        # Detectar columnas de notas
         all_cols = [c for c in df_no.columns if c != 'ROW_INDEX']
         try:
-            idx_coment = next(i for i, c in enumerate(all_cols) if "COMENTARIO" in c)
+            # Buscar cualquier variante de COMENTARIO
+            idx_coment = next(i for i, c in enumerate(all_cols) if "COMENT" in c)
             notas_cols = all_cols[2:idx_coment] if len(all_cols) > 2 else []
         except:
             notas_cols = all_cols[2:] if len(all_cols) > 2 else []
@@ -92,32 +92,26 @@ def load_data_online():
 
 # --- PROCESAMIENTO ---
 def procesar_datos(df_al, df_cu, df_no):
-    if df_no is None or df_no.empty:
-        return pd.DataFrame()
+    if df_no is None or df_no.empty: return pd.DataFrame()
 
-    # Garantizar columnas base
     if 'ID_CURSO' not in df_no.columns: df_no['ID_CURSO'] = "SIN_CURSO"
     if 'DNI' not in df_no.columns: df_no['DNI'] = "0"
 
     try:
-        # --- CORRECCIÓN AQUÍ: Se agregó .str antes de .upper() ---
         df_no['ID_CURSO'] = df_no['ID_CURSO'].astype(str).str.strip().str.upper()
         df_no['DNI'] = df_no['DNI'].astype(str).str.strip()
     except Exception as e:
         st.error(f"Error limpiando columnas clave: {e}")
         return pd.DataFrame()
 
-    # Normalización Auxiliares
     if not df_al.empty:
         if 'DNI' not in df_al.columns: df_al.rename(columns={df_al.columns[0]: 'DNI'}, inplace=True)
         df_al['DNI'] = df_al['DNI'].astype(str).str.strip()
 
     if not df_cu.empty:
         if 'D_CURSO' not in df_cu.columns: df_cu.rename(columns={df_cu.columns[0]: 'D_CURSO'}, inplace=True)
-        # --- CORRECCIÓN AQUÍ TAMBIÉN ---
         df_cu['D_CURSO'] = df_cu['D_CURSO'].astype(str).str.strip().str.upper()
 
-    # Cruces
     if 'NOMBRE' in df_al.columns and 'APELLIDO' in df_al.columns:
         df = pd.merge(df_no, df_al[['DNI', 'NOMBRE', 'APELLIDO']], on='DNI', how='left')
     else:
@@ -152,7 +146,6 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
         existentes = set()
         if not df_notas_actuales.empty and 'DNI' in df_notas_actuales.columns and 'ID_CURSO' in df_notas_actuales.columns:
             ex_dnis = df_notas_actuales['DNI'].astype(str).str.strip()
-            # --- CORRECCIÓN AQUÍ ---
             ex_curs = df_notas_actuales['ID_CURSO'].astype(str).str.strip().str.upper()
             existentes = set(zip(ex_dnis, ex_curs))
 
@@ -189,7 +182,7 @@ def guardar_cambios(edited_df):
 
         batch = []
         cols_check = st.session_state.get('notas_header_list', [])
-        col_com = next((c for c in edited_df.columns if "COMENTARIO" in c), None)
+        col_com = next((c for c in edited_df.columns if "COMENT" in c), None)
         if col_com: cols_check.append(col_com)
 
         for i in range(len(edited_df)):
@@ -224,46 +217,49 @@ if df_no is not None:
 else:
     df_final = pd.DataFrame()
 
-# --- LOGIN ---
+# --- LOGIN (CORREGIDO PARA DETECTAR ERROR DE TIPO) ---
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("Acceso")
+    st.title("Acceso Docente")
     u = st.text_input("DNI")
     p = st.text_input("Clave", type="password")
+
     if st.button("Ingresar"):
         if not df_in.empty:
-            try:
-                # Copia para no romper el original
-                df_login = df_in.copy()
+            # 1. Copia de seguridad
+            df_log = df_in.copy()
 
-                # Asegurar nombres
-                cols = list(df_login.columns)
-                if len(cols) >= 3:  # Esperamos DNI, ID_CURSO, CLAVE
-                    # Asignamos nombres temporales seguros
-                    df_login.columns = ['U', 'C', 'P'] + cols[3:]
+            # 2. Convertir TODO a String y quitar espacios
+            # Iteramos por las columnas por índice para no depender de nombres
+            if len(df_log.columns) >= 3:
+                # Asumimos: Col 0 = DNI, Col 1 = Curso, Col 2 = Clave
+                user_col = df_log.iloc[:, 0].astype(str).str.strip()
+                pass_col = df_log.iloc[:, 2].astype(str).str.strip()
+                curs_col = df_log.iloc[:, 1].astype(str).str.strip().str.upper()
 
-                    # Limpieza segura
-                    df_login['U'] = df_login['U'].astype(str).str.strip()
-                    df_login['P'] = df_login['P'].astype(str).str.strip()
+                # 3. Comparación
+                # Buscamos coincidencias exactas
+                match = df_log[(user_col == u.strip()) & (pass_col == p.strip())]
 
-                    # Verificación
-                    match = df_login[(df_login['U'] == u) & (df_login['P'] == p)]
-
-                    if not match.empty:
-                        st.session_state.auth = True
-                        st.session_state.dni = u
-                        # Guardar cursos
-                        st.session_state.cursos = [str(x).strip().upper() for x in match['C'].unique()]
-                        st.rerun()
-                    else:
-                        st.error("Datos incorrectos.")
+                if not match.empty:
+                    st.session_state.auth = True
+                    st.session_state.dni = u
+                    # Guardamos los cursos
+                    st.session_state.cursos = [str(x).strip().upper() for x in match.iloc[:, 1].unique()]
+                    st.rerun()
                 else:
-                    st.error("Error: La hoja de instructores debe tener 3 columnas (DNI, Curso, Clave)")
-            except Exception as e:
-                st.error(f"Error técnico en login: {e}")
+                    st.error("Datos incorrectos.")
+                    # DEBUG VISUAL: Mostrar tabla para que veas qué está leyendo
+                    with st.expander("🔍 Ver qué está leyendo el sistema (Debug)"):
+                        st.write("Tu hoja de instructores se ve así para el sistema:")
+                        st.dataframe(df_log)
+                        st.write(f"Tú escribiste Usuario: '{u}' y Clave: '{p}'")
+            else:
+                st.error("La hoja de instructores tiene menos de 3 columnas.")
         else:
-            st.error("No se pudo cargar la lista de instructores.")
+            st.error("Error cargando instructores.")
+
 else:
     # --- APP PRINCIPAL ---
     sb = st.sidebar
@@ -282,7 +278,7 @@ else:
         st.warning("No hay notas cargadas.")
     else:
         mis = st.session_state.cursos
-        # Filtro de seguridad por si el ID_CURSO no existe
+        # Filtro de seguridad
         if 'ID_CURSO' in df_final.columns:
             df_mio = df_final[df_final['ID_CURSO'].isin(mis)]
 
@@ -295,7 +291,7 @@ else:
                     with tabs[i]:
                         dft = df_mio[df_mio[CURSO_PRINCIPAL] == g].reset_index(drop=True)
 
-                        col_com = next((c for c in dft.columns if "COMENTARIO" in c), None)
+                        col_com = next((c for c in dft.columns if "COMENT" in c), None)
                         cols_n = st.session_state.get('notas_header_list', [])
 
                         base_cols = ['NOMBRE', 'APELLIDO', 'ID_CURSO']
