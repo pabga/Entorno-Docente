@@ -39,7 +39,6 @@ def load_data_online():
                 ws = sh.worksheet(sheet_name)
                 vals = ws.get_all_values()
                 if not vals: return pd.DataFrame()
-                # Encabezados en mayúsculas y limpios
                 headers = [str(h).strip().upper() for h in vals[0]]
                 if len(vals) > 1:
                     return pd.DataFrame(vals[1:], columns=headers)
@@ -51,7 +50,7 @@ def load_data_online():
         df_cu = get_clean_df("cursos")
         df_in = get_clean_df("instructores")
 
-        # --- CARGA NOTAS (BLINDADA) ---
+        # --- CARGA NOTAS ---
         ws_notas = sh.worksheet("notas")
         raw_notas = ws_notas.get_all_values()
 
@@ -60,7 +59,7 @@ def load_data_online():
 
         headers = [str(h).strip().upper() for h in raw_notas[0]]
 
-        # INYECCIÓN FORZADA DE NOMBRES EN NOTAS
+        # INYECCIÓN FORZADA DE NOMBRES
         if len(headers) >= 1: headers[0] = 'DNI'
         if len(headers) >= 2: headers[1] = 'ID_CURSO'
         if len(headers) == 1: headers.append('ID_CURSO')
@@ -75,7 +74,7 @@ def load_data_online():
         # Detectar columnas de notas
         all_cols = [c for c in df_no.columns if c != 'ROW_INDEX']
         try:
-            idx_coment = next(i for i, c in enumerate(all_cols) if "COMENTARIO" in c)
+            idx_coment = next(i for i, c in enumerate(all_cols) if "COMENT" in c)
             notas_cols = all_cols[2:idx_coment] if len(all_cols) > 2 else []
         except:
             notas_cols = all_cols[2:] if len(all_cols) > 2 else []
@@ -92,21 +91,19 @@ def load_data_online():
 
 # --- PROCESAMIENTO ---
 def procesar_datos(df_al, df_cu, df_no):
-    if df_no is None or df_no.empty:
-        return pd.DataFrame()
+    if df_no is None or df_no.empty: return pd.DataFrame()
 
-    # Garantizar columnas base
     if 'ID_CURSO' not in df_no.columns: df_no['ID_CURSO'] = "SIN_CURSO"
     if 'DNI' not in df_no.columns: df_no['DNI'] = "0"
 
     try:
+        # Convertir a String explícitamente antes de usar .str
         df_no['ID_CURSO'] = df_no['ID_CURSO'].astype(str).str.strip().str.upper()
         df_no['DNI'] = df_no['DNI'].astype(str).str.strip()
     except Exception as e:
         st.error(f"Error limpiando columnas clave: {e}")
         return pd.DataFrame()
 
-    # Normalización Auxiliares
     if not df_al.empty:
         if 'DNI' not in df_al.columns: df_al.rename(columns={df_al.columns[0]: 'DNI'}, inplace=True)
         df_al['DNI'] = df_al['DNI'].astype(str).str.strip()
@@ -165,10 +162,10 @@ def sincronizar_matriz_notas(df_alumnos, df_cursos, df_notas_actuales):
 
         if nuevas:
             ws_notas.append_rows(nuevas)
-            st.success(f"✅ Creados {len(nuevas)} registros.")
+            st.success(f"✅ Se han creado {len(nuevas)} filas nuevas en la hoja de notas.")
             st.rerun()
         else:
-            st.info("Todo al día.")
+            st.info("Todo al día. No faltan alumnos en los cursos.")
     except Exception as e:
         st.error(f"Error Sync: {e}")
 
@@ -221,7 +218,7 @@ if df_no is not None:
 else:
     df_final = pd.DataFrame()
 
-# --- LOGIN CORREGIDO SEGÚN TU DEBUG ---
+# --- LOGIN ---
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
@@ -230,37 +227,58 @@ if not st.session_state.auth:
     p = st.text_input("Clave", type="password")
 
     if st.button("Ingresar"):
-        if not df_in.empty and len(df_in.columns) >= 4:
-            # SEGÚN TU DEBUG:
-            # Col 0 = ID_CURSO
-            # Col 1 = DNI_DOCENTE (Aquí buscamos el usuario)
-            # Col 3 = CLAVE (Aquí buscamos la pass)
+        if not df_in.empty:
+            # 1. Copia de seguridad
+            df_log = df_in.copy()
 
-            user_col = df_in.iloc[:, 1].astype(str).str.strip()  # DNI en columna 1
-            pass_col = df_in.iloc[:, 3].astype(str).str.strip()  # Clave en columna 3
-            curs_col = df_in.iloc[:, 0].astype(str).str.strip().str.upper()  # Curso en columna 0
+            # 2. Convertir TODO a String y quitar espacios
+            if len(df_log.columns) >= 3:
+                # Ajuste según tu debug: Col 1=DNI, Col 3=Clave, Col 0=Curso
+                # Pero en la tabla que pasaste el orden era: ID_CURSO, DNI, ASIGNATURA, CLAVE
+                # Así que usamos índices exactos:
+                try:
+                    user_col = df_log.iloc[:, 1].astype(str).str.strip()
+                    pass_col = df_log.iloc[:, 3].astype(str).str.strip()
+                    curs_col = df_log.iloc[:, 0].astype(str).str.strip().str.upper()
 
-            match = df_in[(user_col == u.strip()) & (pass_col == p.strip())]
+                    # Limpiar entrada usuario
+                    u_clean = str(u).strip()
+                    p_clean = str(p).strip()
 
-            if not match.empty:
-                st.session_state.auth = True
-                st.session_state.dni = u
-                # Guardamos los cursos
-                st.session_state.cursos = [str(x).strip().upper() for x in match.iloc[:, 0].unique()]
-                st.rerun()
+                    # Convertir floats del excel tipo "123.0" a "123"
+                    user_col = user_col.apply(lambda x: x.split('.')[0] if '.' in x else x)
+
+                    match = df_log[(user_col == u_clean) & (pass_col == p_clean)]
+
+                    if not match.empty:
+                        st.session_state.auth = True
+                        st.session_state.dni = u_clean
+                        # Guardar todos los cursos asociados a este DNI
+                        # Buscamos en todo el dataframe donde el DNI coincida
+                        cursos_del_profe = df_log[user_col == u_clean].iloc[:, 0].astype(
+                            str).str.strip().str.upper().unique()
+                        st.session_state.cursos = list(cursos_del_profe)
+                        st.rerun()
+                    else:
+                        st.error("Datos incorrectos.")
+                        # Si quieres quitar el debug, borra estas lineas:
+                        # st.write("Debug - Sistema lee:")
+                        # st.write(df_log.head())
+                except Exception as e:
+                    st.error(f"Error procesando login: {e}")
             else:
-                st.error("Datos incorrectos.")
+                st.error("La hoja de instructores tiene menos de 4 columnas.")
         else:
-            st.error("Error: La hoja de instructores no tiene el formato esperado (4 columnas).")
-
+            st.error("Error cargando instructores.")
 else:
     # --- APP PRINCIPAL ---
     sb = st.sidebar
-    sb.write(f"Usuario: {st.session_state.dni}")
+    sb.title(f"Usuario: {st.session_state.dni}")
 
+    # Botón de Admin siempre visible si eres el admin
     if str(st.session_state.dni) == DNI_ADMIN:
-        sb.info("Admin")
-        if sb.button("🔄 Sincronizar Alumnos"):
+        sb.info("Panel de Administrador")
+        if sb.button("🔄 Sincronizar Alumnos (Crear Filas)"):
             sincronizar_matriz_notas(df_al, df_cu, df_no)
 
     if sb.button("Salir"):
@@ -275,7 +293,9 @@ else:
             df_mio = df_final[df_final['ID_CURSO'].isin(mis)]
 
             if df_mio.empty:
-                st.warning("Tus cursos no tienen alumnos asignados en la hoja de notas.")
+                st.info(f"Hola! Tienes asignados los cursos: {mis}")
+                st.warning("⚠️ Sin embargo, la hoja de 'notas' no tiene alumnos cargados para estos cursos.")
+                st.write("👉 **Solución:** Pide al administrador (41209872) que haga clic en 'Sincronizar Alumnos'.")
             else:
                 grps = sorted(df_mio[CURSO_PRINCIPAL].unique())
                 tabs = st.tabs(grps)
@@ -297,7 +317,7 @@ else:
                         out = st.data_editor(dft[final_edit], column_config=cnf, key=f"e_{g}", hide_index=True,
                                              use_container_width=True)
 
-                        if st.button(f"Guardar {g}", key=f"b_{g}"):
+                        if st.button(f"Guardar Notas de {g}", key=f"b_{g}"):
                             guardar_cambios(out)
         else:
             st.error("Error de estructura en datos procesados.")
